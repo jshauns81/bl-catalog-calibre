@@ -5,6 +5,12 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing plugin tag to validate and publish
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -16,16 +22,21 @@ jobs:
       QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: python -m pip install pytest ruff PyQt6
+      - name: Install offscreen Qt runtime libraries
+        run: sudo apt-get update -qq && sudo apt-get install -y libegl1 libopengl0
       - run: ruff check integrations/calibre tests
       - run: python -m pytest tests -q
       - run: python integrations/calibre/build_plugin.py
       - name: Validate release package and tag
         env:
           PYTHONPATH: integrations/calibre
+          REQUESTED_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           python - <<'PY'
           import json, os
@@ -34,8 +45,8 @@ jobs:
           manifest = json.loads(Path('integrations/calibre/dist/bl-catalog-calibre.json').read_text())
           release = PluginRelease(manifest['tag'], '', '', manifest['sha256'], manifest['size'], tuple(manifest['minimum_calibre_version']))
           validate_package(release, Path('integrations/calibre/dist/bl-catalog-calibre.zip').read_bytes())
-          if os.environ['GITHUB_REF'].startswith('refs/tags/'):
-              assert os.environ['GITHUB_REF_NAME'] == manifest['tag'], 'Tag and plugin version disagree'
+          if os.environ['GITHUB_REF'].startswith('refs/tags/') or os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch':
+              assert os.environ['REQUESTED_TAG'] == manifest['tag'], 'Tag and plugin version disagree'
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -44,13 +55,15 @@ jobs:
           retention-days: 14
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: test-package
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           name: plugin-release
@@ -58,13 +71,14 @@ jobs:
       - name: Publish Stable or Beta release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           args=()
-          if [[ "$GITHUB_REF_NAME" == *-beta.* ]]; then
+          if [[ "$RELEASE_TAG" == *-beta.* ]]; then
             args+=(--prerelease --latest=false)
           else
             args+=(--latest)
           fi
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" \
             dist/bl-catalog-calibre.zip dist/bl-catalog-calibre.json dist/SHA256SUMS \
-            --verify-tag --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md "${args[@]}"
+            --verify-tag --title "$RELEASE_TAG" --notes-file CHANGELOG.md "${args[@]}"

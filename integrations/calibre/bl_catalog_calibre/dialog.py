@@ -886,7 +886,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                 cover=self.chk_cover.isChecked(),
             )
             controller.set_options(opts)
-            update_prefs(controller.prefs)
+            update_prefs({key: value for key, value in controller.prefs.items() if key.startswith("apply_")})
             self._populate_table(proposals_only=True)
 
         def _set_bucket(self, bucket: str) -> None:

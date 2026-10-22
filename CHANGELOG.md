@@ -1,4 +1,9 @@
-# v1.1.0
+# v1.1.1
+
+- Preserve the selected GitHub update channel when metadata Apply options change.
+- Includes the GitHub updater and full-library refresh corrections described below.
+
+## v1.1.0
 
 - Add GitHub-backed Stable and Beta plugin update channels, release notes, verified downloads,
   installation confirmation and restart guidance.

@@ -58,7 +58,7 @@ def test_title_toggle_refreshes_1881_rows_and_preserves_apply_scope(qt_app):
         patch.object(plugin_dialog, "_import_qt", return_value=qt),
         patch.object(plugin_dialog, "CalibreDbWriter", return_value=object()),
         patch.object(plugin_dialog, "DialogController", return_value=controller),
-        patch.object(plugin_dialog, "update_prefs"),
+        patch.object(plugin_dialog, "update_prefs") as save,
     ):
         dialog = plugin_dialog.create_blc_dialog(gui)
         try:
@@ -74,6 +74,7 @@ def test_title_toggle_refreshes_1881_rows_and_preserves_apply_scope(qt_app):
             start = time.monotonic()
             dialog.chk_title.click()
             elapsed = time.monotonic() - start
+            assert "update_channel" not in save.call_args.args[0]
             assert elapsed < 5.0, f"Title toggle blocked for {elapsed:.2f}s"
             assert dialog.table.rowCount() == 1881
             assert dialog._selected_bids() == set()

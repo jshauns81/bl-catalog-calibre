@@ -1284,6 +1284,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             if answer != QMessageBox.StandardButton.Yes:
                 return
 
+            self._apply_target_count = len(target_ids)
             self.hero_state.setText(f"Applying to {len(target_ids)} book(s)\u2026")
             cancel = self._cancel
             self._start_job(
@@ -1295,10 +1296,26 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
 
         def _after_apply(self, results: list[dict[str, Any]]) -> None:
             counts = collections.Counter(r["status"] for r in results)
+            not_attempted = max(0, getattr(self, "_apply_target_count", len(results)) - len(results))
             self.hero_state.setText(
                 f"Apply finished: {counts['written']} written, {counts['refused']} refused, "
-                f"{counts['failed']} failed, {counts['cancelled']} cancelled"
+                f"{counts['failed']} failed, {counts['cancelled']} cancelled, {not_attempted} not attempted"
             )
+            failures = [r for r in results if r["status"] == "failed"]
+            if failures:
+                failure = failures[0]
+                rollback = failure.get("rolled_back")
+                recovery = (
+                    "The failed book's changes were rolled back." if rollback is True else
+                    "Rollback could not be confirmed; check this book before retrying."
+                )
+                QMessageBox.warning(
+                    self, "BL-Catalog Apply Stopped",
+                    f"Stopped at book {failure['id']}: {failure.get('title', '')}\n\n"
+                    f"{failure.get('error', 'Unknown error')}\n{recovery}\n\n"
+                    f"{counts['written']} books written; {not_attempted} not attempted.\n"
+                    "Earlier successful writes remain saved. See the audit log for details.",
+                )
             self.hero_sub.setText(f"Audit log: {controller.prefs.get('log_path')} \u00b7 rescan to refresh rows")
             with contextlib.suppress(AttributeError, RuntimeError, TypeError):
                 gui.library_view.model().refresh_ids([r["id"] for r in results if r["status"] == "written"])

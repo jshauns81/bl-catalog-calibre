@@ -1,4 +1,12 @@
-# v1.2.0
+# v1.2.1
+
+- Prepare synopsis text with the installed Calibre version's comments adapter so normal
+  whitespace conversion does not trigger a false read-back failure and rollback.
+- Keep exact read-back verification and rollback for real content mismatches.
+- Show the failed book, error, rollback status and unattempted count directly after Apply.
+- Include expected and actual values in the audit log for a read-back mismatch.
+
+## v1.2.0
 
 - Save library match results in persistent SQLite storage, isolated by library.
 - Restore saved results on opening; require Scan Changes to check freshness before Apply.

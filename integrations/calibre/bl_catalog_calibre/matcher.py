@@ -584,6 +584,17 @@ def demote_shared(rows: list[dict[str, Any]]) -> None:
                     )
 
 
+def calibre_comments(value: str) -> str:
+    """Predict the installed Calibre version's comments storage representation."""
+    value = value.strip()
+    try:
+        from calibre.db.write import get_adapter  # type: ignore[import-not-found]
+    except ImportError:
+        return value
+    adapter = get_adapter("comments", {"datatype": "text", "is_multiple": False})
+    return adapter(value) or ""
+
+
 def build_proposals(
     book: dict[str, Any],
     work: dict[str, Any] | None,
@@ -639,8 +650,10 @@ def build_proposals(
 
     if options.synopsis:
         syn = scalar_value(work.get("synopsis"))
-        if isinstance(syn, str) and syn.strip() and syn.strip() != (book.get("comments") or "").strip():
-            proposals["synopsis"] = syn.strip()
+        if isinstance(syn, str) and syn.strip():
+            target_comments = calibre_comments(syn)
+            if target_comments != (book.get("comments") or ""):
+                proposals["synopsis"] = target_comments
 
     if options.tags:
         w_tags = tags_of(work)

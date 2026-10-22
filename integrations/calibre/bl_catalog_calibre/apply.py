@@ -43,6 +43,12 @@ class ApplyRefused(Exception):
     """The whole apply batch is refused before any write occurs."""
 
 
+class ReadBackMismatch(RuntimeError):
+    def __init__(self, field: str, expected: Any, actual: Any) -> None:
+        super().__init__(f"read-back: {field} differs from what was sent")
+        self.verification = {"field": field, "expected": expected, "actual": actual}
+
+
 class StaleBookError(RuntimeError):
     """The live Calibre book no longer matches the state the apply decision was based on."""
 
@@ -474,7 +480,7 @@ def apply_matches(
                 if field_name == "identifiers":
                     continue
                 if after.get(field_name) != expected_val:
-                    raise RuntimeError(f"read-back: {field_name} differs from what was sent")
+                    raise ReadBackMismatch(field_name, expected_val, after.get(field_name))
             if any(after.get(f) != state.get(f) for f in state if f not in changes):
                 raise RuntimeError("read-back: a field other than the requested fields changed")
         except Exception as error:  # noqa: BLE001 - any writer or read-back failure halts the batch
@@ -491,6 +497,8 @@ def apply_matches(
                 "before": before_fields,
                 "error": str(error),
             }
+            if isinstance(error, ReadBackMismatch):
+                failed_entry["verification"] = error.verification
             if rolled_back is not None:
                 failed_entry["rolled_back"] = rolled_back
             if cover_backup:

@@ -252,3 +252,37 @@ def test_saved_library_loads_in_background_and_requires_delta_check(qt_app, tmp_
         finally:
             dialog.close()
             gui.close()
+
+
+def test_apply_failure_shows_book_error_and_unattempted_count(qt_app):
+    qt = {
+        name: getattr(module, name)
+        for module in (QtCore, QtGui, QtWidgets)
+        for name in dir(module)
+        if name.startswith("Q") or name == "pyqtSignal"
+    }
+    controller = plugin_dialog.DialogController(object(), prefs=dict(DEFAULTS))
+    gui = QtWidgets.QWidget()
+    gui.current_db = SimpleNamespace(new_api=object())
+    with (
+        patch.object(plugin_dialog, "_import_qt", return_value=qt),
+        patch.object(plugin_dialog, "CalibreDbWriter", return_value=object()),
+        patch.object(plugin_dialog, "DialogController", return_value=controller),
+        patch.object(QtWidgets.QMessageBox, "warning") as warning,
+    ):
+        dialog = plugin_dialog.create_blc_dialog(gui)
+        try:
+            dialog._apply_target_count = 14
+            dialog._after_apply([
+                {"id": 2, "status": "written"}, {"id": 3, "status": "written"},
+                {"id": 4, "title": "Path of the Dark Eldar", "status": "failed",
+                 "error": "read-back: comments differs from what was sent", "rolled_back": True},
+            ])
+            assert "11 not attempted" in dialog.hero_state.text()
+            message = warning.call_args.args[2]
+            assert "book 4: Path of the Dark Eldar" in message
+            assert "rolled back" in message
+            assert "read-back: comments" in message
+        finally:
+            dialog.close()
+            gui.close()

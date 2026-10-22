@@ -75,3 +75,11 @@ If BLC is unavailable, saved results remain viewable, but a fresh check cannot c
 records. Interrupted scans leave the previous saved results intact. Cache failures are shown in
 the status text and do not prevent a fresh scan. This database stores match results, not ebooks,
 credentials, or Calibre's own metadata database. Existing guarded Apply checks remain in place.
+
+## Compact results table
+
+The default table shows ID, title, up to two authors, match bucket and proposed changes.
+Long text uses an ellipsis; hover for the full value, or select a row for the full inspector.
+Enable **Show work ID and reason columns** for those extra columns. Column borders remain
+resizable, and the divider between results and inspector can be dragged. Column widths do
+not scan library contents during window resizing; rows stay single-line for predictable redraws.

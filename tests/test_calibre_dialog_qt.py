@@ -64,11 +64,32 @@ def test_title_toggle_refreshes_1881_rows_and_preserves_apply_scope(qt_app):
         try:
             dialog.show()
             app.processEvents()
+            authors = "; ".join(f"Author {i}" for i in range(100))
+            rows[0]["authors"] = authors
             controller.rows = rows
             dialog._populate_table()
             # Realize the populated view: the stalled path only occurs on a later refresh.
             app.processEvents()
+            assert dialog.table.item(0, 2).text() == "Author 0; Author 1; … (+98)"
+            assert dialog.table.item(0, 2).toolTip() == authors
+            assert not dialog.table.wordWrap()
+            assert dialog.table.isColumnHidden(4) and dialog.table.isColumnHidden(6)
+            assert dialog.table.horizontalScrollBar().maximum() == 0
+            resize_started = time.monotonic()
+            for i in range(80):
+                dialog.resize(1240 + (i % 8) * 25, 780 + (i % 3) * 10)
+                dialog.move(i % 10, i % 15)
+                app.processEvents()
+            assert time.monotonic() - resize_started < 5.0
+            dialog.resize(1240, 780)
+            app.processEvents()
+            assert dialog.table.horizontalScrollBar().maximum() == 0
+            dialog.details_columns.setChecked(True)
+            assert not dialog.table.isColumnHidden(4) and not dialog.table.isColumnHidden(6)
+            dialog.details_columns.setChecked(False)
             header = dialog.table.horizontalHeader()
+            assert all(header.sectionResizeMode(i) != QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+                       for i in range(dialog.table.columnCount()))
             modes = [header.sectionResizeMode(i) for i in range(dialog.table.columnCount())]
             original_cells = [dialog.table.item(0, i) for i in range(dialog.table.columnCount())]
             start = time.monotonic()

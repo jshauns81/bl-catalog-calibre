@@ -1,4 +1,14 @@
-# v1.2.1
+# v1.2.2
+
+- Replace content-sized columns with stable widths and a stretching title column to reduce
+  resize work on large libraries.
+- Show at most two authors with an ellipsis/count; full text stays in tooltips and the inspector.
+- Keep the five main columns visible by default; work IDs/reasons are optional table columns.
+- Use single-line rows and compact change summaries; keep exact identifiers in tooltips.
+- Give the table more room and wrap long status/inspector headings.
+- Includes the synopsis compatibility fix and Apply diagnostics from v1.2.1.
+
+## v1.2.1
 
 - Prepare synopsis text with the installed Calibre version's comments adapter so normal
   whitespace conversion does not trigger a false read-back failure and rollback.

@@ -666,11 +666,13 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             state_col = QVBoxLayout()
             self.hero_state = QLabel("Ready to scan Calibre library")
             self.hero_state.setObjectName("HeroState")
+            self.hero_state.setWordWrap(True)
             self.hero_sub = QLabel(
                 f"Configured catalogue: {controller.prefs.get('url')} \u00b7 "
                 f"{len(self._selected_ids)} selected in Calibre"
             )
             self.hero_sub.setObjectName("HeroSub")
+            self.hero_sub.setWordWrap(True)
             state_col.addWidget(self.hero_state)
             state_col.addWidget(self.hero_sub)
             top_row.addLayout(state_col, 1)
@@ -752,12 +754,17 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             self.table.verticalHeader().setVisible(False)
             th = self.table.horizontalHeader()
+            # Stable widths avoid scanning thousands of cells during window resizing.
+            th.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+            for column, width in enumerate((52, 240, 180, 150, 140, 175, 220)):
+                self.table.setColumnWidth(column, width)
             th.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-            th.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-            th.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-            th.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-            th.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-            th.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+            self.table.setWordWrap(False)
+            self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
+            self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+            self.table.verticalHeader().setDefaultSectionSize(max(30, self.table.fontMetrics().height() + 12))
+            self.table.setColumnHidden(4, True)
+            self.table.setColumnHidden(6, True)
             self.table.itemSelectionChanged.connect(self._on_row_selected)
             table_panel = QFrame(self)
             table_layout = QVBoxLayout(table_panel)
@@ -765,6 +772,9 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.table_empty_lbl = QLabel()
             self.table_empty_lbl.setObjectName("MutedLabel")
             self.table_empty_lbl.setWordWrap(True)
+            self.details_columns = QCheckBox("Show work ID and reason columns")
+            self.details_columns.toggled.connect(self._on_detail_columns)
+            table_layout.addWidget(self.details_columns)
             table_layout.addWidget(self.table_empty_lbl)
             table_layout.addWidget(self.table, 1)
             splitter.addWidget(table_panel)
@@ -777,6 +787,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
 
             insp_head = QLabel("WORK INSPECTOR & MANUAL PICKER")
             insp_head.setObjectName("SectionHeading")
+            insp_head.setWordWrap(True)
             right_layout.addWidget(insp_head)
 
             self.detail_view = QTextBrowser()
@@ -785,6 +796,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
 
             pick_head = QLabel("PICK CATALOGUE WORK (ANTHOLOGIES & OVERRIDES)")
             pick_head.setObjectName("SectionHeading")
+            pick_head.setWordWrap(True)
             right_layout.addWidget(pick_head)
 
             pick_bar = QHBoxLayout()
@@ -807,14 +819,15 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.pick_list.currentRowChanged.connect(self._update_pick_enabled)
             right_layout.addWidget(self.pick_list)
 
-            self.pick_apply_btn = QPushButton("Assign Picked Work to Selected Book")
+            self.pick_apply_btn = QPushButton("Assign Work to Selected Book")
             self.pick_apply_btn.setEnabled(False)
             self.pick_apply_btn.clicked.connect(self._on_assign_pick)
             right_layout.addWidget(self.pick_apply_btn)
 
             splitter.addWidget(right_card)
             splitter.setStretchFactor(0, 3)
-            splitter.setStretchFactor(1, 2)
+            splitter.setStretchFactor(1, 1)
+            splitter.setSizes([870, 330])
             body.addWidget(splitter, 1)
 
             # --- Footer Apply Card ---
@@ -1067,6 +1080,10 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.apply_btn.setEnabled(ready_count > 0 and not controller.cache_needs_check)
             self._populate_table()
 
+        def _on_detail_columns(self, visible: bool) -> None:
+            self.table.setColumnHidden(4, not visible)
+            self.table.setColumnHidden(6, not visible)
+
         def _populate_table(self, *, proposals_only: bool = False) -> None:
             updates_enabled = self.table.updatesEnabled()
             signals_blocked = self.table.blockSignals(True)
@@ -1086,11 +1103,15 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self._on_row_selected()
 
         def _proposal_text(self, row: dict[str, Any]) -> str:
-            parts = [f"{k}:{v}" for k, v in sorted((row.get("add") or {}).items())]
+            parts = ["+identifiers"] if row.get("add") else []
             for field in ("title", "authors", "series", "synopsis", "tags", "cover"):
                 if field in (row.get("proposals") or {}):
                     parts.append(f"+{field}")
             return ", ".join(parts) or "No changes"
+
+        def _proposal_tooltip(self, row: dict[str, Any]) -> str:
+            identifiers = [f"{k}: {v}" for k, v in sorted((row.get("add") or {}).items())]
+            return "\n".join([*identifiers, self._proposal_text(row)])
 
         def _populate_table_items(self, *, proposals_only: bool = False) -> None:
             keep = self._selected_bids()
@@ -1101,6 +1122,8 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                     text = self._proposal_text(row)
                     if item is not None and item.text() != text:
                         item.setText(text)
+                    if item is not None:
+                        item.setToolTip(self._proposal_tooltip(row))
                 return
             if controller.rows:
                 empty_message = "No books match these filters. Choose All or change the filter text."
@@ -1116,7 +1139,12 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                 bid_item.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
                 self.table.setItem(r_idx, 0, bid_item)
                 self.table.setItem(r_idx, 1, QTableWidgetItem(str(row.get("title") or "")))
-                self.table.setItem(r_idx, 2, QTableWidgetItem(str(row.get("authors") or "")))
+                authors = str(row.get("authors") or "")
+                names = [name.strip() for name in authors.split(";") if name.strip()]
+                author_text = "; ".join(names[:2])
+                if len(names) > 2:
+                    author_text += f"; … (+{len(names) - 2})"
+                self.table.setItem(r_idx, 2, QTableWidgetItem(author_text))
 
                 b_style = BUCKET_STYLE.get(row["bucket"], BUCKET_STYLE["not_in_blc"])
                 b_item = QTableWidgetItem(b_style["label"])
@@ -1127,6 +1155,12 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
 
                 self.table.setItem(r_idx, 5, QTableWidgetItem(self._proposal_text(row)))
                 self.table.setItem(r_idx, 6, QTableWidgetItem(str(row.get("reason") or "")))
+                for column in range(self.table.columnCount()):
+                    item = self.table.item(r_idx, column)
+                    tooltip = authors if column == 2 else item.text()
+                    if column == 5:
+                        tooltip = self._proposal_tooltip(row)
+                    item.setToolTip(tooltip)
 
             # No automatic selection: an empty selection means "apply visible rows", so a
             # selected row must always be a deliberate choice. Rows the user already selected

@@ -203,3 +203,52 @@ def test_update_dialog_checks_downloads_installs_and_recovers(qt_app):
             assert not dialog.install_button.isEnabled()
         finally:
             dialog.close()
+
+
+def test_saved_library_loads_in_background_and_requires_delta_check(qt_app, tmp_path):
+    from bl_catalog_calibre.scan_cache import ScanCache
+    from test_calibre_scan_cache import Catalogue, Library
+
+    library, catalogue = Library(), Catalogue()
+    controller = plugin_dialog.DialogController(
+        library, prefs=dict(DEFAULTS), lookups=catalogue,
+        scan_cache=ScanCache(tmp_path / "scan.sqlite", "test-library"),
+    )
+    controller.scan()
+    controller.rows = []
+    catalogue.fail = True
+    qt = {
+        name: getattr(module, name)
+        for module in (QtCore, QtGui, QtWidgets)
+        for name in dir(module)
+        if name.startswith("Q") or name == "pyqtSignal"
+    }
+    gui = QtWidgets.QWidget()
+    gui.current_db = SimpleNamespace(new_api=object())
+    with (
+        patch.object(plugin_dialog, "_import_qt", return_value=qt),
+        patch.object(plugin_dialog, "CalibreDbWriter", return_value=library),
+        patch.object(plugin_dialog, "DialogController", return_value=controller),
+    ):
+        dialog = plugin_dialog.create_blc_dialog(gui)
+        try:
+            deadline = time.monotonic() + 5
+            while dialog._busy and time.monotonic() < deadline:
+                qt_app.processEvents()
+                time.sleep(0.005)
+            assert not dialog._busy
+            assert dialog.table.rowCount() == 1
+            assert "saved results" in dialog.hero_state.text()
+            assert not dialog.apply_btn.isEnabled()
+            assert not dialog.pick_apply_btn.isEnabled()
+            dialog._run_scan(selected_only=False)
+            while dialog._busy and time.monotonic() < deadline:
+                qt_app.processEvents()
+                time.sleep(0.005)
+            assert not dialog._busy
+            assert dialog.apply_btn.isEnabled()
+            assert "1 cached, 0 rematched" in dialog.hero_sub.text()
+            assert catalogue.calls == 1
+        finally:
+            dialog.close()
+            gui.close()

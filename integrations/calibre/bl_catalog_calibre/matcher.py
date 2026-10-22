@@ -692,6 +692,8 @@ def run_scan(
     lookups: Any,
     options: ApplyOptions | None = None,
     progress=None,
+    *,
+    deduplicate: bool = True,
 ) -> list[dict[str, Any]]:
     """Classify a list of Calibre books and demote shared works."""
     opts = options or ApplyOptions()
@@ -724,7 +726,8 @@ def run_scan(
         rows.append(row)
         if progress:
             progress(n, total, row)
-    demote_shared(rows)
+    if deduplicate:
+        demote_shared(rows)
     return rows
 
 

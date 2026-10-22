@@ -35,6 +35,7 @@ PLUGIN_FILES = (
     "config.py",
     "dialog.py",
     "matcher.py",
+    "scan_cache.py",
     "source.py",
     "style.py",
     "version.py",

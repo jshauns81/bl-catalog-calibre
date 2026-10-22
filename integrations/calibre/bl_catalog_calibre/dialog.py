@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import copy
+import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -24,14 +26,17 @@ from .config import (
 from .matcher import (
     APPLICABLE_BUCKETS,
     BUCKETS,
+    CatalogueError,
     apply_manual_pick,
     authors_of,
     build_proposals,
+    demote_shared,
     offered_credits,
     run_scan,
     title_of,
     write_csv,
 )
+from .scan_cache import MATCHER_REVISION, ScanCache, default_cache_path, fingerprint
 from .style import BUCKET_STYLE, build_stylesheet, render_work_detail_html
 
 
@@ -56,8 +61,13 @@ class DialogController:
         *,
         prefs: dict[str, Any] | None = None,
         lookups: Lookups | None = None,
+        scan_cache: ScanCache | None = None,
     ) -> None:
         self.writer = writer
+        self.scan_cache = scan_cache
+        self.scan_stats: dict[str, Any] = {}
+        self.cache_needs_check = False
+        self._raw_rows: dict[int, dict[str, Any]] = {}
         self.prefs = dict(prefs if prefs is not None else get_prefs())
         self.options: ApplyOptions = current_apply_options(self.prefs)
         self._injected_lookups = lookups
@@ -125,25 +135,101 @@ class DialogController:
         self._injected_lookups = None
         return target, version
 
+    def _cache_scope(self) -> str:
+        return json.dumps([MATCHER_REVISION, self.prefs.get("url"), self.prefs.get("mode"),
+                           self.prefs.get("snapshot_path")], sort_keys=True)
+
+    def restore_cache(self) -> bool:
+        """Restore unchanged books without contacting BLC; require a version check before Apply."""
+        if self.scan_cache is None:
+            return False
+        records = self.scan_cache.load()
+        self.books = self.writer.read_books(None)
+        self.books_by_id = {int(b["id"]): b for b in self.books}
+        self._raw_rows = {
+            bid: copy.deepcopy(entry["row"]) for bid, entry in records.items()
+            if bid in self.books_by_id and entry["scope"] == self._cache_scope()
+            and entry["fingerprint"] == fingerprint(self.books_by_id[bid])
+        }
+        self.rows = list(copy.deepcopy(self._raw_rows).values())
+        self.set_options(self.options)
+        demote_shared(self.rows)
+        self.cache_needs_check = bool(self.rows)
+        dates = [records[int(r["id"])]["scanned_at"] for r in self.rows]
+        versions = {records[int(r["id"])]["version"] for r in self.rows}
+        self.catalog_version = next(iter(versions)) if len(versions) == 1 else None
+        self.scan_stats = {"saved_at": max(dates) if dates else ""}
+        return bool(self.rows)
+
     def scan(
         self,
         book_ids: list[int] | tuple[int, ...] | None = None,
         progress=None,
+        *,
+        force: bool = False,
     ) -> list[dict[str, Any]]:
-        """Read books from ``writer`` and classify them into BLC buckets."""
+        """Compare live books with saved fingerprints and rematch only invalidated rows."""
         all_books = self.writer.read_books(None)
-        self.books = all_books
-        self.books_by_id = {int(b["id"]): b for b in all_books}
-        if book_ids is not None:
-            wanted = {int(i) for i in book_ids}
-            target_books = [b for b in all_books if int(b["id"]) in wanted]
-        else:
-            target_books = all_books
-
+        books_by_id = {int(b["id"]): b for b in all_books}
+        wanted = {int(i) for i in book_ids} if book_ids is not None else set(books_by_id)
+        target_books = [b for b in all_books if int(b["id"]) in wanted]
         lookups = self.build_lookups()
-        self.rows = run_scan(target_books, lookups, options=self.options, progress=progress)
-        self.catalog_version = lookups.version or self.catalog_version
-        return self.rows
+        backend = getattr(lookups, "backend", None)
+        if self._injected_lookups is None and isinstance(backend, SnapshotCatalogClient):
+            try:
+                if backend.http_client and backend.http_client.fetch_version() != backend.version:
+                    backend.close()
+                    self.sync_snapshot()
+                    lookups = self.build_lookups()
+                    backend = getattr(lookups, "backend", None)
+            except BaseException:
+                backend.close()
+                raise
+        if isinstance(backend, HttpCatalogClient):
+            version = backend.fetch_version()
+        else:
+            version = lookups.version
+        scope = self._cache_scope()
+        records = self.scan_cache.load() if self.scan_cache is not None else {}
+        raw_rows = []
+        reused = 0
+        try:
+            for n, book in enumerate(target_books, 1):
+                bid = int(book["id"])
+                entry = records.get(bid)
+                if (not force and version and entry and entry["scope"] == scope
+                        and entry["version"] == version
+                        and entry["fingerprint"] == fingerprint(book)):
+                    row = copy.deepcopy(entry["row"])
+                    reused += 1
+                else:
+                    row = run_scan([book], lookups, options=self.options, deduplicate=False)[0]
+                    if (entry and entry["scope"] == scope and entry["row"].get("picked")
+                            and entry["fingerprint"] == fingerprint(book) and row["bucket"] != "error"):
+                        picked_work = lookups.work(entry["row"].get("work_id") or "")
+                        if picked_work:
+                            apply_manual_pick(row, book, picked_work, self.options)
+                    if version and lookups.version and lookups.version != version:
+                        raise CatalogueError("BLC changed during the scan. Run Scan Changes again.")
+                raw_rows.append(row)
+                if progress:
+                    progress(n, len(target_books), row)
+            # Commit only after the complete operation, including cancellation checks.
+            if self.scan_cache is not None and version:
+                self.scan_cache.save(books_by_id, raw_rows, scope, version, set(books_by_id))
+            self.books = all_books
+            self.books_by_id = books_by_id
+            self._raw_rows = {int(r["id"]): copy.deepcopy(r) for r in raw_rows}
+            self.rows = raw_rows
+            self.set_options(self.options)
+            demote_shared(self.rows)
+            self.catalog_version = version or lookups.version or self.catalog_version
+            self.cache_needs_check = False
+            self.scan_stats = {"reused": reused, "matched": len(raw_rows) - reused}
+            return self.rows
+        finally:
+            if self._injected_lookups is None and isinstance(backend, SnapshotCatalogClient):
+                backend.close()
 
     def bucket_counts(self) -> dict[str, int]:
         counts = collections.Counter(r["bucket"] for r in self.rows)
@@ -181,7 +267,14 @@ class DialogController:
             raise KeyError(f"Book {book_id} is not loaded")
         for row in self.rows:
             if int(row["id"]) == int(book_id):
-                return apply_manual_pick(row, book, work, self.options)
+                if self.cache_needs_check:
+                    raise ApplyRefused("Run Scan Changes before assigning saved results")
+                picked = apply_manual_pick(row, book, work, self.options)
+                self._raw_rows[int(book_id)] = copy.deepcopy(picked)
+                if self.scan_cache is not None and self.catalog_version:
+                    self.scan_cache.save(self.books_by_id, [picked], self._cache_scope(),
+                                         self.catalog_version, set(self.books_by_id))
+                return picked
         raise KeyError(f"Scan row for book {book_id} not found")
 
     def export_csv(self, path: str | Path) -> None:
@@ -215,6 +308,8 @@ class DialogController:
         should_stop: Any = None,
     ) -> list[dict[str, Any]]:
         """Run guarded apply on exactly ``book_ids`` (default: ``plan_apply()`` with no selection)."""
+        if self.cache_needs_check:
+            raise ApplyRefused("Run Scan Changes to check saved results before applying metadata")
         cap = int(max_books if max_books is not None else (self.prefs.get("max_apply") or 50))
         log = log_path if log_path is not None else self.prefs.get("log_path")
         if book_ids is None:
@@ -474,7 +569,10 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
     Qt = qt["Qt"]
 
     writer = CalibreDbWriter(gui.current_db.new_api)
-    controller = DialogController(writer)
+    cache_path = default_cache_path()
+    library_path = getattr(gui.current_db, "library_path", None)
+    cache = ScanCache(cache_path, str(Path(library_path).resolve())) if cache_path and library_path else None
+    controller = DialogController(writer, scan_cache=cache)
 
     class _JobBridge(QObject):
         """Carries worker-thread results back to the GUI thread through queued signals."""
@@ -585,11 +683,14 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.scan_sel_btn.clicked.connect(lambda: self._run_scan(selected_only=True))
             ctl_row.addWidget(self.scan_sel_btn)
 
-            self.scan_all_btn = QPushButton("Scan Full Library")
+            self.scan_all_btn = QPushButton("Scan Changes")
             if not self._selected_ids:
                 self.scan_all_btn.setObjectName("PrimaryButton")
             self.scan_all_btn.clicked.connect(lambda: self._run_scan(selected_only=False))
             ctl_row.addWidget(self.scan_all_btn)
+            self.rescan_btn = QPushButton("Force Full Rescan")
+            self.rescan_btn.clicked.connect(lambda: self._run_scan(selected_only=False, force=True))
+            ctl_row.addWidget(self.rescan_btn)
 
             self.csv_btn = QPushButton("Export CSV")
             self.csv_btn.setEnabled(False)
@@ -767,10 +868,28 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             body.addWidget(footer)
             root.addLayout(body, 1)
             self._populate_table()
+            if controller.scan_cache is not None:
+                self._start_job("Load saved scan", controller.restore_cache, self._after_restore, cancellable=False)
+
+        def _after_restore(self, restored: bool) -> None:
+            if restored:
+                self._after_scan()
+                self.hero_state.setText(f"{len(controller.rows)} saved results; check for changes before applying")
+                self.hero_sub.setText(
+                    f"Saved: {controller.scan_stats.get('saved_at', '')} · "
+                    f"Catalogue: {controller.catalog_version or 'mixed versions'} · Run Scan Changes"
+                )
+                self.apply_btn.setEnabled(False)
+            elif controller.scan_cache and controller.scan_cache.error:
+                self.hero_sub.setText("Saved scan unavailable; scan again. " + controller.scan_cache.error)
 
         def _on_mode_changed(self) -> None:
             controller.prefs["mode"] = self.mode_combo.currentData()
             update_prefs({"mode": controller.prefs["mode"]})
+            if controller.rows:
+                controller.cache_needs_check = True
+                self.apply_btn.setEnabled(False)
+                self.hero_state.setText("Catalogue mode changed; run Scan Changes before applying")
 
         def _on_plugin_updates(self) -> None:
             from .update_ui import create_update_dialog
@@ -784,7 +903,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
 
         def _lockable_widgets(self) -> list[Any]:
             return [
-                self.scan_sel_btn, self.scan_all_btn, self.sync_btn, self.csv_btn,
+                self.scan_sel_btn, self.scan_all_btn, self.rescan_btn, self.sync_btn, self.csv_btn,
                 self.apply_btn, self.pick_search_btn, self.pick_apply_btn, self.mode_combo, self.updates_btn,
                 self.max_spin, self.chk_identifiers, self.chk_title, self.chk_authors,
                 self.chk_series, self.chk_synopsis, self.chk_tags, self.chk_cover,
@@ -870,7 +989,9 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                 update_prefs({"mode": "snapshot", "snapshot_path": str(target)})
                 self.mode_combo.setCurrentIndex(0)
                 self.version_lbl.setText(f"snapshot \u00b7 {ver}")
-                self.hero_state.setText(f"Snapshot {ver} synced")
+                controller.cache_needs_check = bool(controller.rows)
+                self.apply_btn.setEnabled(False)
+                self.hero_state.setText(f"Snapshot {ver} synced; run Scan Changes")
                 self.hero_sub.setText(f"Saved to {target}")
 
             self._start_job("Snapshot Sync", controller.sync_snapshot, _done, cancellable=False)
@@ -899,7 +1020,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             controller.search_filter = text
             self._populate_table()
 
-        def _run_scan(self, *, selected_only: bool) -> None:
+        def _run_scan(self, *, selected_only: bool, force: bool = False) -> None:
             ids = self._selected_ids if selected_only else None
             self.hero_state.setText("Scanning books against BL-Catalog\u2026")
             self.progress.setValue(0)
@@ -915,7 +1036,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
 
             self._start_job(
                 "Scan",
-                lambda: controller.scan(ids, progress=_prog),
+                lambda: controller.scan(ids, progress=_prog, force=force),
                 lambda _rows: self._after_scan(),
                 cancellable=True,
             )
@@ -937,7 +1058,13 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                 f"already: {counts['already']}"
             )
             self.csv_btn.setEnabled(bool(controller.rows))
-            self.apply_btn.setEnabled(ready_count > 0)
+            stats = controller.scan_stats
+            if "reused" in stats:
+                self.hero_sub.setText(self.hero_sub.text() +
+                    f" · {stats['reused']} cached, {stats['matched']} rematched")
+            if controller.scan_cache and controller.scan_cache.error:
+                self.hero_sub.setText(self.hero_sub.text() + " · Cache save failed: " + controller.scan_cache.error)
+            self.apply_btn.setEnabled(ready_count > 0 and not controller.cache_needs_check)
             self._populate_table()
 
         def _populate_table(self, *, proposals_only: bool = False) -> None:
@@ -980,7 +1107,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             elif self._scan_completed:
                 empty_message = "No books were found in this scan. Add books in Calibre or scan the full library."
             else:
-                empty_message = "No books scanned yet. Use Scan Selected or Scan Full Library to find matches."
+                empty_message = "No books scanned yet. Use Scan Selected or Scan Changes to find matches."
             self.table_empty_lbl.setText(empty_message)
             self.table_empty_lbl.setVisible(not shown)
             self.table.setRowCount(len(shown))
@@ -1056,7 +1183,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
         def _update_pick_enabled(self) -> None:
             idx = self.pick_list.currentRow()
             self.pick_apply_btn.setEnabled(
-                not self._busy and self._current_row() is not None
+                not self._busy and not controller.cache_needs_check and self._current_row() is not None
                 and 0 <= idx < len(self._candidate_works)
             )
 

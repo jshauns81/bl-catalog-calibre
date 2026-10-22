@@ -53,3 +53,25 @@ To release, set `PLUGIN_VERSION` and `RELEASE_TAG`, commit the changes, and push
 `vX.Y.Z` tag for Stable or `vX.Y.Z-beta.N` for Beta. The release workflow tests and validates
 the package, then publishes the three assets. Beta tags are marked as prereleases and do not
 replace the latest Stable release. Update channels follow numeric version ordering.
+
+## Saved scans and delta matching
+
+The matcher saves results in `plugins/bl_catalog/library-scans.sqlite` under Calibre's
+configuration directory. In calibre-rdp this is
+`/config/.config/calibre/plugins/bl_catalog/library-scans.sqlite`, backed by persistent appdata.
+Each library path has its own records. Moving a library starts a new cache.
+
+Opening the matcher restores unchanged books in a background job without contacting BLC.
+Saved results show their last check time and catalogue version; run **Scan Changes** before Apply.
+The first scan matches everything. Later scans compare current metadata with saved fingerprints,
+reuse unchanged results, match added/edited books, and remove deleted books from the saved list.
+Duplicate-work checks run over the combined results each time. Metadata options rebuild previews
+from cached work data. Manual picks persist and are revalidated when catalogue data changes.
+
+**Scan Changes** checks BLC's catalogue version. Snapshot Mode automatically downloads a newer
+snapshot when needed; a new version rechecks all books, including previously unmatched titles.
+If BLC is unavailable, saved results remain viewable, but a fresh check cannot complete.
+**Force Full Rescan** bypasses saved automatic matches. Selected scans update only those books'
+records. Interrupted scans leave the previous saved results intact. Cache failures are shown in
+the status text and do not prevent a fresh scan. This database stores match results, not ebooks,
+credentials, or Calibre's own metadata database. Existing guarded Apply checks remain in place.

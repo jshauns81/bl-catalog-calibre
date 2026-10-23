@@ -86,8 +86,10 @@ metadata, avoiding hundreds of unrelated candidates for titles starting with “
 The default table shows ID, title, up to two authors, match bucket and proposed changes.
 Long text uses an ellipsis; hover for the full value, or select a row for the full inspector.
 Enable **Show work ID and reason columns** for those extra columns. Column borders remain
-resizable, and the divider between results and inspector can be dragged. Column widths do
-not scan library contents during window resizing; rows stay single-line for predictable redraws.
+resizable. The table and inspector share one rounded panel with an 8-pixel inset. The
+Book details / Manual match pane stays 320 logical pixels wide; resizing gives the table
+the remaining space. Column widths do not scan library contents during resizing; rows
+stay single-line for predictable redraws.
 
 ## Filters and results after Apply
 
@@ -124,3 +126,10 @@ saving refreshed results), with processed/total counts and percentage. Refused, 
 cancelled books count as processed; the final summary gives each outcome separately.
 Elapsed time remains visible. Cancel stops after the current book rather than interrupting
 a partial write. Percent text is not painted over the moving fill.
+
+
+## Batch limit
+
+The footer **Max** field accepts 1 to 5,000 books per Apply batch. Type a number directly
+or use its arrows. Your chosen limit is remembered when editing finishes or Apply is clicked.
+The confirmation still identifies the actual count and selected book IDs before any write.

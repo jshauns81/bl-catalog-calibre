@@ -29,3 +29,13 @@ A second native confirmation applied two additional real books successfully. The
 Explicit runtime checks restored all 1,882 rows in 2.38 seconds, verified all six tested cover receipts, and reused the six unchanged books with catalogue networking blocked. The exact 95,177-byte installed v1.3.1 ZIP matches the tested package. Calibre's actual ZIP resource accessor retrieved the compiled arrow resource successfully. Dropdown and spinner arrows were visible in native RDP; Fusion and Windows pixel/click tests also pass.
 
 Native Calibre runs Python with optimization enabled; the final QA harness uses explicit exceptions for checks so Python assertion removal cannot skip calls or validation. Public portable suite: 105 tests plus 22 updater subtests; private combined plugin suite: 158 tests plus 22 subtests. Ruff passes. Restart is deliberately deferred so the authenticated RDP session remains available.
+
+## v1.3.2 shared results panel
+
+Read-only Qt rendering used a copy of saved matches from the real 1,882-book library, under the existing palette and larger host fonts. Table and inspector now share one rounded frame with an 8-pixel inset. The inspector remains 320 logical pixels wide across 1240×780 → 1600×1000 → 1240×780, with no splitter. At 11 pt bold and 1240×780 the table viewport is 834×295 and details viewport 290×266; at 1600×1000 the table grows to 1194×545 while inspector width stays fixed. Default horizontal overflow is zero. All four outer corner samples retain the surrounding background; table children no longer paint over the curve.
+
+The existing large-font layout, manual-match and progress tests pass. Independent checks cover 9 pt at the 1000×720 minimum, plus 11 pt bold and 12 pt at normal/wide sizes, both tabs, filtering, column resizing and keyboard focus. Manual-tab horizontal margins were reduced to keep its assignment button fully visible in the fixed pane.
+
+A separate Qt preference check changed Max to 500, finished editing and reopened the dialog: 500 was retained, only max_apply was saved, the update channel stayed unchanged, and the existing 1–5,000 range remained. No real metadata writes were performed for this layout refinement.
+
+The matcher window title identifies plugin release v1.3.2 separately from the active catalogue snapshot label. Toolbar code installed into a running Calibre process becomes active on a full Calibre restart; a temporary QA window opened yesterday was loaded explicitly for testing in that process.

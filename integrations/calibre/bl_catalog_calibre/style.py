@@ -146,7 +146,7 @@ def build_stylesheet() -> str:
         font-family: "JetBrains Mono", monospace;
         font-size: 11px;
     }}
-    QFrame#Card, QFrame#HeroCard {{
+    QFrame#Card, QFrame#HeroCard, QFrame#ResultsPanel {{
         background-color: {t["color_surface"]};
         border: 1px solid {t["color_border"]};
         border-radius: 12px;
@@ -326,6 +326,17 @@ def build_stylesheet() -> str:
         gridline-color: {t["color_border"]};
         selection-background-color: {t["color_primary"]};
         selection-color: {t["color_on_primary"]};
+    }}
+    QFrame#InspectorPane {{
+        background-color: transparent;
+        border: none;
+    }}
+    QTableWidget#MatchResults {{
+        border: 1px solid transparent;
+        border-radius: 0;
+    }}
+    QTableWidget#MatchResults:focus {{
+        border-color: {t["color_primary"]};
     }}
     QTableWidget::item:selected, QListWidget::item:selected {{
         background-color: {t["color_primary"]};

@@ -1,4 +1,12 @@
-# v1.3.1
+# v1.3.2
+
+- Put the results table and inspector inside one rounded panel with a small inset, keeping square table painting clear of the outer corners.
+- Give Book details / Manual match a fixed 320-pixel logical width and remove the movable divider; the table takes remaining space.
+- Keep the table's keyboard focus outline, native scrolling, column resizing and large-font manual controls usable.
+- Show the plugin release in the matcher window title, separately from the catalogue snapshot version.
+- Remember the footer Max batch limit across dialog opens. Its existing range remains 1 to 5,000 books.
+
+## v1.3.1
 
 - Show readable counts and percentage outside the progress fill.
 - Report the current book and Apply stage while checking matches, downloading covers, writing metadata, verifying read-back and saving refreshed results.

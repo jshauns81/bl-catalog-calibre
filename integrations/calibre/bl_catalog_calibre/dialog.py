@@ -44,6 +44,7 @@ from .matcher import (
 from .scan_cache import MATCHER_REVISION, ScanCache, default_cache_path, fingerprint
 from .snapshot import migrate_snapshot_path
 from .style import BUCKET_STYLE, build_stylesheet, render_work_detail_html
+from .version import RELEASE_TAG
 
 
 class OperationCancelled(Exception):
@@ -517,7 +518,6 @@ def _import_qt():
             QProgressBar,
             QPushButton,
             QSpinBox,
-            QSplitter,
             Qt,
             QTableWidget,
             QTableWidgetItem,
@@ -552,7 +552,6 @@ def _import_qt():
             "QProgressBar": QProgressBar,
             "QPushButton": QPushButton,
             "QSpinBox": QSpinBox,
-            "QSplitter": QSplitter,
             "Qt": Qt,
             "QTableWidget": QTableWidget,
             "QTableWidgetItem": QTableWidgetItem,
@@ -706,7 +705,6 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
     QCheckBox = qt["QCheckBox"]
     QSpinBox = qt["QSpinBox"]
     QProgressBar = qt["QProgressBar"]
-    QSplitter = qt["QSplitter"]
     QTableWidget = qt["QTableWidget"]
     QTableWidgetItem = qt["QTableWidgetItem"]
     QTabWidget = qt["QTabWidget"]
@@ -738,7 +736,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
     class _Dialog(QDialog):
         def __init__(self) -> None:
             super().__init__(gui)
-            self.setWindowTitle("bl-catalog \u00b7 Black Library Catalogue")
+            self.setWindowTitle(f"bl-catalog {RELEASE_TAG} \u00b7 Black Library Catalogue")
             if icon is not None:
                 self.setWindowIcon(icon)
             self.resize(1240, 780)
@@ -922,10 +920,15 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             filter_row.addWidget(self.hide_stamped_chk)
             body.addLayout(filter_row)
 
-            # --- Main Splitter: Left Table + Right Inspector/Picker ---
-            splitter = QSplitter(Qt.Orientation.Horizontal, self)
+            # --- Results table and fixed-width inspector ---
+            self.results_panel = QFrame(self)
+            self.results_panel.setObjectName("ResultsPanel")
+            results_layout = QHBoxLayout(self.results_panel)
+            results_layout.setContentsMargins(8, 8, 8, 8)
+            results_layout.setSpacing(12)
 
             self.table = QTableWidget(0, 7)
+            self.table.setObjectName("MatchResults")
             self.table.setHorizontalHeaderLabels([
                 "ID",
                 "Title",
@@ -964,12 +967,13 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             filter_row.addWidget(self.details_columns)
             table_layout.addWidget(self.table_empty_lbl)
             table_layout.addWidget(self.table, 1)
-            splitter.addWidget(table_panel)
+            results_layout.addWidget(table_panel, 1)
 
             right_card = QFrame(self)
-            right_card.setObjectName("Card")
+            right_card.setObjectName("InspectorPane")
+            right_card.setFixedWidth(320)
             right_layout = QVBoxLayout(right_card)
-            right_layout.setContentsMargins(14, 14, 14, 14)
+            right_layout.setContentsMargins(8, 0, 0, 0)
             right_layout.setSpacing(8)
             self.inspector_tabs = QTabWidget()
             right_layout.addWidget(self.inspector_tabs)
@@ -978,7 +982,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.inspector_tabs.addTab(self.detail_view, "Book details")
             picker = qt["QWidget"]()
             picker_layout = QVBoxLayout(picker)
-            picker_layout.setContentsMargins(8, 12, 8, 0)
+            picker_layout.setContentsMargins(4, 12, 4, 0)
             picker_layout.setSpacing(8)
             self.inspector_tabs.addTab(picker, "Manual match")
 
@@ -1011,11 +1015,8 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.pick_apply_btn.clicked.connect(self._on_assign_pick)
             picker_layout.addWidget(self.pick_apply_btn)
 
-            splitter.addWidget(right_card)
-            splitter.setStretchFactor(0, 3)
-            splitter.setStretchFactor(1, 1)
-            splitter.setSizes([870, 330])
-            body.addWidget(splitter, 1)
+            results_layout.addWidget(right_card)
+            body.addWidget(self.results_panel, 1)
 
             # --- Footer Apply Card ---
             footer = QFrame(self)
@@ -1069,6 +1070,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.max_spin = QSpinBox()
             self.max_spin.setRange(1, 5000)
             self.max_spin.setValue(int(controller.prefs.get("max_apply") or 50))
+            self.max_spin.editingFinished.connect(self._on_max_changed)
             flayout.addWidget(self.max_spin)
 
             self.apply_btn = QPushButton("Apply Visible Matches (0)")
@@ -1648,9 +1650,15 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                 controller.export_csv(path)
                 self.hero_sub.setText(f"Exported {len(controller.rows)} rows to {path}")
 
-        def _on_apply(self) -> None:
+        def _on_max_changed(self) -> None:
             cap = int(self.max_spin.value())
-            controller.prefs["max_apply"] = cap
+            if controller.prefs.get("max_apply") != cap:
+                controller.prefs["max_apply"] = cap
+                update_prefs({"max_apply": cap})
+
+        def _on_apply(self) -> None:
+            self._on_max_changed()
+            cap = int(self.max_spin.value())
             selected_bids = self._selected_bids()
             target_ids, eligible = controller.plan_apply(selected_bids, max_books=cap)
             if not target_ids:

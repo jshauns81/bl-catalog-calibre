@@ -62,7 +62,7 @@ configuration directory. In calibre-rdp this is
 Each library path has its own records. Moving a library starts a new cache.
 
 Opening the matcher restores unchanged books in a background job without contacting BLC.
-Saved results show their last check time and catalogue version; run **Scan Changes** before Apply.
+Saved results show their last check time and catalogue version; a background check enables Apply automatically.
 The first scan matches everything. Later scans compare current metadata with saved fingerprints,
 reuse unchanged results, match added/edited books, and remove deleted books from the saved list.
 Duplicate-work checks run over the combined results each time. Metadata options rebuild previews
@@ -97,3 +97,14 @@ move into Already. Active filters remain in effect, so a successful book may lea
 view or disappear when stamped books are hidden. Clear Filters reveals all loaded rows again.
 Failed/rolled-back and unattempted books are not marked updated. Refresh/storage problems are
 reported separately from successful writes. No Apply writes occur when clearing filters.
+
+## Opening a previous scan
+
+Saved scans now check themselves automatically when the matcher opens. Existing matches
+are restored first, then a background delta check verifies live metadata/catalogue freshness
+for previously scanned IDs. Unchanged rows are reused; changed/outdated cached rows rematch.
+Apply becomes available when this finishes, without clicking Scan Selected or Scan Changes.
+The existing live write guards still run when Apply is confirmed. New unscanned books still
+need a first scan; opening an old scan does not silently start matching the rest of a library.
+If the check fails or is cancelled, saved rows remain visible and Apply stays blocked; use
+Scan Changes to retry. The status explains this rather than requiring a scan every session.

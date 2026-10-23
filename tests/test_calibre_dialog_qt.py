@@ -226,7 +226,7 @@ def test_update_dialog_checks_downloads_installs_and_recovers(qt_app):
             dialog.close()
 
 
-def test_saved_library_loads_in_background_and_requires_delta_check(qt_app, tmp_path):
+def test_saved_library_is_automatically_ready_without_scan_click(qt_app, tmp_path):
     from bl_catalog_calibre.scan_cache import ScanCache
     from test_calibre_scan_cache import Catalogue, Library
 
@@ -237,6 +237,8 @@ def test_saved_library_loads_in_background_and_requires_delta_check(qt_app, tmp_
     )
     controller.scan()
     controller.rows = []
+    # Opening saved results must not silently start matching an unscanned book.
+    library.books.append({**library.books[0], "id": 2, "title": "Unscanned"})
     catalogue.fail = True
     qt = {
         name: getattr(module, name)
@@ -259,14 +261,9 @@ def test_saved_library_loads_in_background_and_requires_delta_check(qt_app, tmp_
                 time.sleep(0.005)
             assert not dialog._busy
             assert dialog.table.rowCount() == 1
-            assert "saved results" in dialog.hero_state.text()
-            assert not dialog.apply_btn.isEnabled()
+            assert "matches ready" in dialog.hero_state.text()
+            assert not controller.cache_needs_check
             assert not dialog.pick_apply_btn.isEnabled()
-            dialog._run_scan(selected_only=False)
-            while dialog._busy and time.monotonic() < deadline:
-                qt_app.processEvents()
-                time.sleep(0.005)
-            assert not dialog._busy
             assert dialog.apply_btn.isEnabled()
             assert "1 cached, 0 rematched" in dialog.hero_sub.text()
             assert catalogue.calls == 1
@@ -358,5 +355,79 @@ def test_apply_refresh_and_clear_filters_without_rescan(qt_app, tmp_path):
             assert not dialog.hide_stamped_chk.isChecked()
             assert dialog._bucket_buttons["all"][0].isChecked()
         finally:
+            dialog.close()
+            gui.close()
+
+
+@pytest.mark.parametrize("scenario", ["changed", "offline", "waiting", "cancelled"])
+def test_automatic_saved_check_handles_changes_and_blocks_unverified_apply(qt_app, tmp_path, scenario):
+    from bl_catalog_calibre.scan_cache import ScanCache
+    from test_calibre_scan_cache import Catalogue, Library
+
+    library, catalogue = Library(), Catalogue()
+    controller = plugin_dialog.DialogController(
+        library, prefs=dict(DEFAULTS), lookups=catalogue,
+        scan_cache=ScanCache(tmp_path / "scan.sqlite", "test-library"),
+    )
+    controller.scan()
+    controller.rows = []
+    gate = threading.Event()
+    started = threading.Event()
+    if scenario == "changed":
+        library.books[0]["tags"] = ["Edited outside plugin"]
+    else:
+        original = controller.build_lookups
+        def build():
+            started.set()
+            if scenario == "offline":
+                raise RuntimeError("BLC unavailable")
+            gate.wait(5)
+            return original()
+        controller.build_lookups = build
+    qt = {
+        name: getattr(module, name)
+        for module in (QtCore, QtGui, QtWidgets)
+        for name in dir(module)
+        if name.startswith("Q") or name == "pyqtSignal"
+    }
+    gui = QtWidgets.QWidget()
+    gui.current_db = SimpleNamespace(new_api=object())
+    with (
+        patch.object(plugin_dialog, "_import_qt", return_value=qt),
+        patch.object(plugin_dialog, "CalibreDbWriter", return_value=library),
+        patch.object(plugin_dialog, "DialogController", return_value=controller),
+        patch.object(QtWidgets.QMessageBox, "warning") as warning,
+    ):
+        dialog = plugin_dialog.create_blc_dialog(gui)
+        try:
+            deadline = time.monotonic() + 5
+            while dialog._busy and time.monotonic() < deadline:
+                qt_app.processEvents()
+                if scenario in ("waiting", "cancelled") and started.is_set() and not gate.is_set():
+                    assert dialog._busy
+                    assert not dialog.apply_btn.isEnabled()
+                    assert "automatically" in dialog.hero_state.text()
+                    if scenario == "cancelled":
+                        dialog._on_cancel()
+                    gate.set()
+                time.sleep(0.005)
+            assert not dialog._busy
+            assert dialog.table.rowCount() == 1
+            if scenario in ("offline", "cancelled"):
+                assert controller.cache_needs_check
+                assert not dialog.apply_btn.isEnabled()
+                if scenario == "offline":
+                    assert warning.called
+                    assert "could not be checked" in dialog.hero_state.text()
+                else:
+                    assert "cancelled" in dialog.hero_state.text()
+            else:
+                assert not controller.cache_needs_check
+                assert dialog.apply_btn.isEnabled()
+                assert catalogue.calls == (2 if scenario == "changed" else 1)
+                if scenario == "changed":
+                    assert controller.books_by_id[1]["tags"] == ["Edited outside plugin"]
+        finally:
+            gate.set()
             dialog.close()
             gui.close()

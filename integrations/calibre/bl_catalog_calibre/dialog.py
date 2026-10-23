@@ -68,6 +68,7 @@ class DialogController:
         self.scan_stats: dict[str, Any] = {}
         self.refresh_error = ""
         self.cache_needs_check = False
+        self.saved_book_ids: list[int] = []
         self._raw_rows: dict[int, dict[str, Any]] = {}
         self.prefs = dict(prefs if prefs is not None else get_prefs())
         self.options: ApplyOptions = current_apply_options(self.prefs)
@@ -146,6 +147,7 @@ class DialogController:
         if self.scan_cache is None:
             return False
         records = self.scan_cache.load()
+        self.saved_book_ids = sorted(records)
         self.books = self.writer.read_books(None)
         self.books_by_id = {int(b["id"]): b for b in self.books}
         self._raw_rows = {
@@ -957,12 +959,23 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
         def _after_restore(self, restored: bool) -> None:
             if restored:
                 self._after_scan()
-                self.hero_state.setText(f"{len(controller.rows)} saved results; check for changes before applying")
-                self.hero_sub.setText(
-                    f"Saved: {controller.scan_stats.get('saved_at', '')} · "
-                    f"Catalogue: {controller.catalog_version or 'mixed versions'} · Run Scan Changes"
-                )
+            if controller.saved_book_ids:
+                self.hero_state.setText("Checking saved results automatically…")
+                self.hero_sub.setText("Reusing unchanged matches; checking metadata and catalogue freshness.")
+                self.progress.setValue(0)
                 self.apply_btn.setEnabled(False)
+
+                def progress(done: int, total: int, _row: dict[str, Any]) -> None:
+                    if self._cancel.is_set():
+                        raise OperationCancelled()
+                    self._bridge.progressed.emit(done, total)
+
+                self._start_job(
+                    "Saved results check",
+                    lambda: controller.scan(controller.saved_book_ids, progress=progress),
+                    lambda _rows: self._after_scan(),
+                    cancellable=True,
+                )
             elif controller.scan_cache and controller.scan_cache.error:
                 self.hero_sub.setText("Saved scan unavailable; scan again. " + controller.scan_cache.error)
 
@@ -1028,6 +1041,9 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.cancel_btn.setEnabled(False)
             if not ok and self._job_title == "Scan":
                 self._populate_table()
+            if not ok and self._job_title == "Saved results check":
+                self.hero_state.setText("Saved results could not be checked")
+                self.hero_sub.setText("Saved rows remain visible. Use Scan Changes to retry before applying.")
             if not ok and self._job_title == "BLC Search":
                 self.pick_status.setText("Search failed. Check the catalogue connection and try again.")
             if ok:

@@ -1,4 +1,12 @@
-# v1.2.3
+# v1.2.4
+
+- Check restored scan results automatically in the background when opening the matcher.
+- Enable Apply for validated saved matches without a manual Scan Selected/Scan Changes step.
+- Reuse unchanged saved matches and rematch changed/outdated cached books only.
+- Keep Apply blocked with a visible retry explanation if validation fails or is cancelled.
+- Leave new, unscanned books for their first explicitly requested scan.
+
+## v1.2.3
 
 - Add Clear Filters and a search clear icon; resetting filters does not scan the library.
 - Add a persistent Hide BLC-stamped books toggle.

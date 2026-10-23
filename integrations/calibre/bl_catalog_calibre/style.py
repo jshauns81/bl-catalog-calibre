@@ -9,6 +9,7 @@ for >= 4.5:1 contrast over #343f44 and #3d484d surfaces.
 from __future__ import annotations
 
 import html
+from pathlib import Path
 from typing import Any
 
 TOKENS: dict[str, str] = {
@@ -89,9 +90,35 @@ BUCKET_STYLE: dict[str, dict[str, str]] = {
     },
 }
 
+_CONTROL_RESOURCES: bytes | None = None
+
+
+def _register_control_resources() -> None:
+    """Load the arrows compiled with ``rcc --binary images/controls.qrc -o images/controls.rcc``."""
+    global _CONTROL_RESOURCES
+    if _CONTROL_RESOURCES is not None:
+        return
+    try:
+        from qt.core import QResource  # type: ignore[import-not-found]
+    except ImportError:
+        try:
+            from PyQt6.QtCore import QResource
+        except ImportError:
+            return
+    resource_loader = globals().get("get_resources")
+    if callable(resource_loader):
+        data = resource_loader("images/controls.rcc")
+    else:
+        data = (Path(__file__).parent / "images" / "controls.rcc").read_bytes()
+    if not data or not QResource.registerResourceData(data):
+        raise RuntimeError("Could not load the BL-Catalog control arrow resources")
+    # Qt requires the backing data to remain alive while the resource is registered.
+    _CONTROL_RESOURCES = data
+
 
 def build_stylesheet() -> str:
     """Return the Qt stylesheet using BL-Catalog's Reading Lamp tokens."""
+    _register_control_resources()
     t = TOKENS
     return f"""
     QDialog, QWidget#MainSurface {{
@@ -140,6 +167,11 @@ def build_stylesheet() -> str:
         color: {t["color_text_panel_muted"]};
         font-size: 13px;
     }}
+    QLabel#OperationProgress {{
+        color: {t["color_text"]};
+        background-color: transparent;
+        font-weight: 600;
+    }}
     QLabel#MutedLabel {{
         color: {t["color_text_panel_muted"]};
         font-size: 12px;
@@ -157,6 +189,59 @@ def build_stylesheet() -> str:
     QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{
         border: 2px solid {t["color_primary"]};
         padding: 5px 9px;
+    }}
+    QComboBox, QSpinBox {{
+        padding-right: 42px;
+    }}
+    QComboBox:focus, QSpinBox:focus {{
+        padding-right: 41px;
+    }}
+    QComboBox::drop-down {{
+        subcontrol-origin: border;
+        subcontrol-position: top right;
+        width: 28px;
+        border-left: 1px solid {t["color_border_control"]};
+        border-top-right-radius: 8px;
+        border-bottom-right-radius: 8px;
+        background-color: {t["color_surface_2"]};
+    }}
+    QComboBox::down-arrow {{
+        image: url(:/bl-catalog/controls/down.svg);
+        width: 12px;
+        height: 8px;
+    }}
+    QSpinBox {{
+        min-height: 32px;
+    }}
+    QSpinBox::up-button {{
+        subcontrol-origin: border;
+        subcontrol-position: top right;
+        width: 28px;
+        border-left: 1px solid {t["color_border_control"]};
+        border-top-right-radius: 8px;
+        background-color: {t["color_surface_2"]};
+    }}
+    QSpinBox::down-button {{
+        subcontrol-origin: border;
+        subcontrol-position: bottom right;
+        width: 28px;
+        border-left: 1px solid {t["color_border_control"]};
+        border-top: 1px solid {t["color_border_control"]};
+        border-bottom-right-radius: 8px;
+        background-color: {t["color_surface_2"]};
+    }}
+    QSpinBox::up-arrow {{
+        image: url(:/bl-catalog/controls/up.svg);
+        width: 12px;
+        height: 8px;
+    }}
+    QSpinBox::down-arrow {{
+        image: url(:/bl-catalog/controls/down.svg);
+        width: 12px;
+        height: 8px;
+    }}
+    QComboBox::drop-down:hover, QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+        background-color: #314649;
     }}
     QPushButton {{
         background-color: {t["color_surface_2"]};

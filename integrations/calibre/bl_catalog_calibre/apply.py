@@ -23,6 +23,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -246,11 +247,13 @@ def apply_matches(
     log_path: str | Path | None = None,
     options: ApplyOptions | None = None,
     should_stop: Any = None,
+    progress: Any = None,
 ) -> list[dict[str, Any]]:
     """Re-classify and apply BLC updates to ``targets`` with read-back verification.
 
     ``should_stop`` is an optional zero-argument callable checked before each book; when it
     returns true the remaining books are recorded as ``cancelled`` and nothing more is written.
+    ``progress(done, total, event)`` reports completed results and the current book's phase.
     """
     opts = options or ApplyOptions()
     if not opts.any_enabled():
@@ -274,6 +277,22 @@ def apply_matches(
             holders[str(existing_wid)].add(int(b["id"]))
 
     results: list[dict[str, Any]] = []
+    positions = {bid: index for index, bid in enumerate(ids, 1)}
+
+    def report(phase: str, entry: dict[str, Any]) -> None:
+        if progress is None:
+            return
+        bid = int(entry["id"])
+        event = {
+            "phase": phase,
+            "id": bid,
+            "title": str(entry.get("title") or (by_id.get(bid) or {}).get("title") or ""),
+            "current": positions[bid],
+        }
+        try:
+            progress(len(results), len(items), event)
+        except Exception:
+            logging.getLogger(__name__).exception("Could not report Calibre Apply progress")
 
     def record(entry: dict[str, Any]) -> dict[str, Any]:
         full_entry = {
@@ -282,6 +301,7 @@ def apply_matches(
         }
         append_log(log_path, full_entry)
         results.append(full_entry)
+        report(str(full_entry["status"]), full_entry)
         return full_entry
 
     # First pass: classify every target live so two books in the same batch claiming the same
@@ -292,6 +312,7 @@ def apply_matches(
         bid = item["id"]
         picked_wid = item["picked_work_id"]
         book = by_id.get(bid)
+        report("checking", item)
         if not book:
             planned.append((item, None, None))
             continue
@@ -379,6 +400,7 @@ def apply_matches(
             })
             continue
 
+        report("checking", base)
         try:
             state = writer.state(bid)["state"]
         except Exception as error:  # noqa: BLE001 - preserve earlier successes when a live state read fails
@@ -467,6 +489,7 @@ def apply_matches(
                 except Exception:  # noqa: BLE001 - an unreadable cover must not justify skipping a write
                     cover_verified = False
             if not cover_verified and cov and cov["good"] and hasattr(lookups, "verified_cover"):
+                report("cover", base)
                 try:
                     if hasattr(lookups, "begin"):
                         lookups.begin()
@@ -492,12 +515,14 @@ def apply_matches(
         try:
             if cover_bytes is not None and hasattr(writer, "cover_bytes"):
                 cover_backup = _save_cover_backup(log_path, bid, writer.cover_bytes(bid))
+            report("writing", base)
             try:
                 reply = writer.set_fields(bid, changes, expected=state, cover_bytes=cover_bytes)
             except TypeError:
                 # Backward-compatible with 3-arg FakeWriter.set_fields(bid, changes, expected=state)
                 reply = writer.set_fields(bid, changes, expected=state)
             written_ok = True
+            report("verifying", base)
             after = writer.state(bid)["state"]
             if "identifiers" in changes and dict(after["identifiers"]) != changes["identifiers"]:
                 raise RuntimeError("read-back: identifiers differ from what was sent")

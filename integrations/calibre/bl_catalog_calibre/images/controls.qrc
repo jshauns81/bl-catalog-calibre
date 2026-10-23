@@ -1,0 +1,4 @@
+<RCC><qresource prefix="/bl-catalog/controls">
+  <file alias="up.svg">control-up.svg</file>
+  <file alias="down.svg">control-down.svg</file>
+</qresource></RCC>

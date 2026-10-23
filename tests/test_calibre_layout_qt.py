@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +32,14 @@ def _settle(app):
     # Grid reflow posts layout requests, which can post another parent layout request.
     for _ in range(6):
         app.processEvents()
+
+
+def _wait_for(app, predicate):
+    deadline = time.monotonic() + 3
+    while not predicate() and time.monotonic() < deadline:
+        app.processEvents()
+        QtCore.QThread.msleep(2)
+    assert predicate()
 
 
 @pytest.fixture
@@ -241,3 +251,115 @@ def test_selecting_external_cover_edit_refreshes_visible_proposal(qt_app, tmp_pa
         finally:
             dialog.close()
             gui.close()
+
+
+@pytest.mark.parametrize("scanned_dialog", [(12, False)], indirect=True)
+def test_apply_reports_held_worker_phases_and_cancellation_outside_bar(qt_app, scanned_dialog):
+    dialog, controller = scanned_dialog
+    checking_done = threading.Event()
+    download_done = threading.Event()
+    refresh_done = threading.Event()
+    title = "The <Flesh> Tearer"
+
+    def apply(ids, *, max_books, should_stop, progress):
+        assert ids == list(range(1, 11))
+        progress(0, 10, {"phase": "checking", "current": 3, "id": 3, "title": title})
+        assert checking_done.wait(5)
+        progress(2, 10, {"phase": "cover", "current": 3, "id": 3, "title": title})
+        assert download_done.wait(5)
+        assert should_stop()
+        progress(3, 10, {"phase": "refreshing"})
+        assert refresh_done.wait(5)
+        return []
+
+    model = dialog.table.model()
+    selection = QtCore.QItemSelection(model.index(0, 0), model.index(9, 6))
+    dialog.table.selectionModel().select(selection, QtCore.QItemSelectionModel.SelectionFlag.Select)
+    assert not dialog.progress.isVisible()
+    assert not dialog.operation_progress_lbl.isVisible()
+    assert not dialog.progress.isTextVisible()
+    try:
+        with (
+            patch.object(controller, "apply", side_effect=apply),
+            patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.StandardButton.Yes),
+            patch.object(QtWidgets.QMessageBox, "warning"),
+        ):
+            dialog._on_apply()
+            assert dialog.operation_progress_lbl.isVisible()
+            assert "reading current Calibre metadata" in dialog.operation_progress_lbl.text()
+            _wait_for(qt_app, lambda: "Checking match 3 of 10" in dialog.operation_progress_lbl.text())
+            assert dialog._busy
+            assert "0 of 10 complete (0%)" in dialog.operation_progress_lbl.text()
+            checking_done.set()
+            _wait_for(qt_app, lambda: "Downloading cover" in dialog.operation_progress_lbl.text())
+            assert dialog._busy
+            label = dialog.operation_progress_lbl
+            assert label.textFormat() == QtCore.Qt.TextFormat.PlainText
+            assert "2 of 10 complete (20%)" in label.text()
+            assert f"Book 3: {title}" in label.text()
+            assert dialog.progress.value() == 20
+            assert label.parentWidget() is dialog.progress.parentWidget()
+            assert label.geometry().bottom() < dialog.progress.geometry().top()
+            assert label.height() >= label.fontMetrics().height()
+            _assert_controls_fit(dialog)
+            heartbeat = []
+            QtCore.QTimer.singleShot(0, lambda: heartbeat.append(True))
+            _wait_for(qt_app, lambda: bool(heartbeat))
+            dialog.cancel_btn.click()
+            assert "Stopping after Book 3" in label.text()
+            assert title in label.text()
+            download_done.set()
+            _wait_for(qt_app, lambda: "Saving refreshed results" in label.text())
+            assert dialog._busy
+            assert "3 of 10 processed (30%)" in label.text()
+            refresh_done.set()
+            _wait_for(qt_app, lambda: not dialog._busy)
+            assert not dialog.progress.isVisible()
+            assert not label.isVisible()
+            assert label.text() == ""
+            assert not dialog._elapsed_timer.isActive()
+    finally:
+        if dialog._busy:
+            dialog._cancel.set()
+        checking_done.set()
+        download_done.set()
+        refresh_done.set()
+        _wait_for(qt_app, lambda: not dialog._busy)
+
+
+@pytest.mark.parametrize("scanned_dialog", [(12, False)], indirect=True)
+def test_scan_counts_are_readable_before_worker_finishes(qt_app, scanned_dialog):
+    dialog, controller = scanned_dialog
+    metadata_done = threading.Event()
+    matching_done = threading.Event()
+
+    def scan(ids, *, progress, force):
+        assert metadata_done.wait(5)
+        progress(312, 1882, {})
+        assert matching_done.wait(5)
+        return controller.rows
+
+    try:
+        with (
+            patch.object(controller, "scan", side_effect=scan),
+            patch.object(QtWidgets.QMessageBox, "warning"),
+        ):
+            dialog._run_scan(selected_only=False)
+            assert dialog._busy
+            assert "Reading Calibre metadata" in dialog.operation_progress_lbl.text()
+            assert dialog.progress.maximum() == 0
+            assert not dialog.progress.isTextVisible()
+            metadata_done.set()
+            _wait_for(qt_app, lambda: "312 of 1882 books (17%)" in dialog.operation_progress_lbl.text())
+            assert dialog._busy
+            assert dialog.progress.value() == 17
+            assert dialog.operation_progress_lbl.isVisible()
+            matching_done.set()
+            _wait_for(qt_app, lambda: not dialog._busy)
+            assert not dialog.progress.isVisible()
+            assert not dialog.operation_progress_lbl.isVisible()
+            assert dialog.operation_progress_lbl.text() == ""
+    finally:
+        metadata_done.set()
+        matching_done.set()
+        _wait_for(qt_app, lambda: not dialog._busy)

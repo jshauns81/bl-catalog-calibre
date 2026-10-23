@@ -45,6 +45,10 @@ PLUGIN_FILES = (
     "plugin-import-name-bl_catalog_calibre.txt",
     "images/icon.png",
     "images/icon.svg",
+    "images/control-up.svg",
+    "images/control-down.svg",
+    "images/controls.qrc",
+    "images/controls.rcc",
 )
 
 

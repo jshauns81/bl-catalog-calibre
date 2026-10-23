@@ -1,4 +1,11 @@
-# v1.3.0
+# v1.3.1
+
+- Show readable counts and percentage outside the progress fill.
+- Report the current book and Apply stage while checking matches, downloading covers, writing metadata, verifying read-back and saving refreshed results.
+- Keep progress and elapsed time visible during slow work; retain cancellation and per-outcome summaries.
+- Give dropdown and spinner arrows visible artwork and larger controls under both Qt styles.
+
+## v1.3.0
 
 - Restore saved matches without automatic catalogue checks, downloads or library rematching.
 - Keep the active snapshot in persistent configuration. Snapshot adoption is explicit and confirmed; existing matches remain usable, with only requested books rechecked on Apply.

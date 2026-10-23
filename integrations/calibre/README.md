@@ -145,3 +145,12 @@ Successful cover writes save a receipt for the catalogue image and Calibre's sto
 or reopening. Selecting a book checks its current cover; Apply checks again before skipping
 a cover write. External cover edits and new catalogue images remain eligible for replacement.
 Unknown catalogue series positions do not propose clearing Calibre's required series index.
+
+## Operation progress
+
+Scan and Apply progress is shown as readable text above the progress bar. Apply identifies
+the current book and stage (checking matches, downloading a cover, writing, verifying or
+saving refreshed results), with processed/total counts and percentage. Refused, failed and
+cancelled books count as processed; the final summary gives each outcome separately.
+Elapsed time remains visible. Cancel stops after the current book rather than interrupting
+a partial write. Percent text is not painted over the moving fill.

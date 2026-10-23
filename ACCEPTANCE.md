@@ -21,3 +21,11 @@ Replacing one cover outside the plugin invalidated its receipt and offered a cov
 Clear Filters reset search, bucket and stamped-book hiding without a scan. Restoring saved matches and checking the four unchanged books worked with catalogue networking blocked, with zero attempted network calls. Explicit native snapshot confirmation downloaded and activated the snapshot, kept all 1,882 rows and the active filter, and did not start a scan.
 
 Automated regressions additionally cover invalid snapshot preservation, stable reads across atomic replacement, cache/version/source boundaries, interrupted scans, stale writes, duplicate work claims, partial-write recovery, partial results after a later live-state/cover failure, external cover changes, nullable series positions, large-font layouts and Qt-rendered proposed fields.
+
+## v1.3.1 progress follow-up
+
+A second native confirmation applied two additional real books successfully. The UI displayed the current book, checking/downloading/writing/verifying stages, monotonic processed counts and percent outside the bar, then the saving-results phase. Each cover request was deliberately delayed by 1.5 seconds in the QA harness to inspect feedback during slow work; that delay is absent from the plugin. The two-book operation completed in 7.6 seconds with the injected delay. Both Updated rows persisted after reopening, with no remaining proposals or repeat writes.
+
+Explicit runtime checks restored all 1,882 rows in 2.38 seconds, verified all six tested cover receipts, and reused the six unchanged books with catalogue networking blocked. The exact 95,177-byte installed v1.3.1 ZIP matches the tested package. Calibre's actual ZIP resource accessor retrieved the compiled arrow resource successfully. Dropdown and spinner arrows were visible in native RDP; Fusion and Windows pixel/click tests also pass.
+
+Native Calibre runs Python with optimization enabled; the final QA harness uses explicit exceptions for checks so Python assertion removal cannot skip calls or validation. Public portable suite: 105 tests plus 22 updater subtests; private combined plugin suite: 158 tests plus 22 subtests. Ruff passes. Restart is deliberately deferred so the authenticated RDP session remains available.

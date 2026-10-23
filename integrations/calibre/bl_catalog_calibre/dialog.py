@@ -12,6 +12,7 @@ import contextlib
 import copy
 import hashlib
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -376,6 +377,7 @@ class DialogController:
         max_books: int | None = None,
         log_path: str | Path | None = None,
         should_stop: Any = None,
+        progress: Any = None,
     ) -> list[dict[str, Any]]:
         """Run guarded apply on exactly ``book_ids`` (default: ``plan_apply()`` with no selection)."""
         if self.cache_needs_check:
@@ -416,8 +418,16 @@ class DialogController:
                 log_path=log,
                 options=self.options,
                 should_stop=should_stop,
+                progress=progress,
             )
             self.refresh_error = ""
+            if progress is not None:
+                try:
+                    progress(len(results), len(wanted), {
+                        "phase": "refreshing", "id": None, "title": "", "current": len(wanted),
+                    })
+                except Exception:
+                    logging.getLogger(__name__).exception("Could not report Calibre Apply refresh progress")
             try:
                 self._refresh_written_rows(results, lookups)
             except Exception as exc:  # noqa: BLE001 - writes already succeeded; report refresh separately
@@ -723,6 +733,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
 
         finished = pyqtSignal(object)
         progressed = pyqtSignal(int, int)
+        apply_progressed = pyqtSignal(int, int, object)
 
     class _Dialog(QDialog):
         def __init__(self) -> None:
@@ -744,6 +755,8 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self._bridge = _JobBridge(self)
             self._bridge.finished.connect(self._on_job_finished)
             self._bridge.progressed.connect(self._on_job_progress)
+            self._bridge.apply_progressed.connect(self._on_job_apply_progress)
+            self._apply_event: dict[str, Any] | None = None
             self._elapsed_timer = qt["QTimer"](self)
             self._elapsed_timer.setInterval(1000)
             self._elapsed_timer.timeout.connect(self._update_elapsed)
@@ -855,9 +868,17 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
 
             hero_layout.addLayout(ctl_row)
 
+            self.operation_progress_lbl = QLabel("")
+            self.operation_progress_lbl.setObjectName("OperationProgress")
+            self.operation_progress_lbl.setTextFormat(Qt.TextFormat.PlainText)
+            self.operation_progress_lbl.setWordWrap(True)
+            self.operation_progress_lbl.setVisible(False)
+            hero_layout.addWidget(self.operation_progress_lbl)
+
             self.progress = QProgressBar()
             self.progress.setRange(0, 100)
             self.progress.setValue(0)
+            self.progress.setTextVisible(False)
             self.progress.setVisible(False)
             hero_layout.addWidget(self.progress)
 
@@ -1144,8 +1165,18 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self._job_done = on_done
             self._job_title = title
             self._job_started = time.monotonic()
+            self._apply_event = None
             self._update_elapsed()
             self._elapsed_timer.start()
+            initial_stage = {
+                "Scan": "Reading Calibre metadata and checking saved matches…",
+                "Apply": "Preparing selected books and reading current Calibre metadata…",
+                "Load saved scan": "Loading saved matches and checking local Calibre metadata…",
+                "Snapshot Sync": "Downloading and validating the catalogue snapshot…",
+                "BLC Search": "Searching the catalogue…",
+            }.get(title, f"{title}…")
+            self.operation_progress_lbl.setText(initial_stage)
+            self.operation_progress_lbl.setVisible(True)
             self.progress.setRange(0, 0)
             self.progress.setVisible(True)
             self._locked = [(w, w.isEnabled()) for w in self._lockable_widgets()]
@@ -1167,10 +1198,48 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.elapsed_lbl.setText(f"{self._job_title} · {elapsed:.0f}s")
 
         def _on_job_progress(self, done: int, total: int) -> None:
+            if self._busy and total > 0:
+                done = max(0, min(done, total))
+                percentage = round(done * 100 / total)
+                self.progress.setRange(0, 100)
+                self.progress.setValue(percentage)
+                text = f"{done} of {total} books ({percentage}%)"
+                if self._cancel.is_set():
+                    text += " · Stopping after the current book…"
+                self.operation_progress_lbl.setText(text)
+
+        def _on_job_apply_progress(self, done: int, total: int, event: Any) -> None:
+            if not self._busy or self._job_title != "Apply":
+                return
+            event = dict(event) if isinstance(event, dict) else {}
+            self._apply_event = event
+            phase = event.get("phase")
+            done = max(0, min(done, total)) if total > 0 else 0
+            percentage = round(done * 100 / total) if total > 0 else 0
             if total > 0:
                 self.progress.setRange(0, 100)
-                self.progress.setFormat(f"{done} / {total}")
-                self.progress.setValue(int(done * 100 / total))
+                self.progress.setValue(percentage)
+            if phase == "refreshing":
+                text = f"Saving refreshed results · {done} of {total} processed ({percentage}%)"
+            else:
+                stage = {
+                    "checking": f"Checking match {event.get('current', 1)} of {total}",
+                    "cover": "Downloading cover",
+                    "writing": "Writing metadata",
+                    "verifying": "Verifying saved changes",
+                    "written": "Book updated",
+                    "refused": "Book refused",
+                    "failed": "Book failed",
+                    "cancelled": "Book cancelled",
+                }.get(phase, "Processing book")
+                text = f"{done} of {total} complete ({percentage}%) · {stage}"
+                if event.get("id") is not None:
+                    text += f" · Book {event['id']}"
+                    if event.get("title"):
+                        text += f": {event['title']}"
+            if self._cancel.is_set():
+                text += " · Stopping after the current step…"
+            self.operation_progress_lbl.setText(text)
 
         def _on_job_finished(self, outcome: Any) -> None:
             ok, value = outcome
@@ -1182,6 +1251,8 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.elapsed_lbl.setText(f"{self._job_title} · {elapsed:.1f}s")
             self.progress.setVisible(False)
             self.progress.setRange(0, 100)
+            self.operation_progress_lbl.setVisible(False)
+            self.operation_progress_lbl.clear()
             for w, was in self._locked:
                 w.setEnabled(was)
             self._locked = []
@@ -1204,7 +1275,18 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             if self._busy:
                 self._cancel.set()
                 self.cancel_btn.setEnabled(False)
-                self.hero_sub.setText("Stopping after the current book\u2026")
+                event = self._apply_event or {}
+                if event.get("phase") == "refreshing":
+                    text = "Finishing saved-result refresh before stopping…"
+                elif event.get("id") is not None:
+                    text = f"Stopping after Book {event['id']}"
+                    if event.get("title"):
+                        text += f": {event['title']}"
+                    text += " finishes…"
+                else:
+                    text = "Stopping after the current step…"
+                self.hero_sub.setText(text)
+                self.operation_progress_lbl.setText(text)
 
         def reject(self) -> None:
             if self._busy:
@@ -1606,9 +1688,14 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self._apply_target_count = len(target_ids)
             self.hero_state.setText(f"Applying to {len(target_ids)} book(s)\u2026")
             cancel = self._cancel
+            bridge = self._bridge
+
+            def _prog(done: int, total: int, event: dict[str, Any]) -> None:
+                bridge.apply_progressed.emit(done, total, dict(event))
+
             self._start_job(
                 "Apply",
-                lambda: controller.apply(target_ids, max_books=cap, should_stop=cancel.is_set),
+                lambda: controller.apply(target_ids, max_books=cap, should_stop=cancel.is_set, progress=_prog),
                 self._after_apply,
                 cancellable=True,
             )

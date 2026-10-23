@@ -54,27 +54,32 @@ To release, set `PLUGIN_VERSION` and `RELEASE_TAG`, commit the changes, and push
 the package, then publishes the three assets. Beta tags are marked as prereleases and do not
 replace the latest Stable release. Update channels follow numeric version ordering.
 
-## Saved scans and delta matching
+## Saved scans and manual snapshot updates
 
-The matcher saves results in `plugins/bl_catalog/library-scans.sqlite` under Calibre's
-configuration directory. In calibre-rdp this is
-`/config/.config/calibre/plugins/bl_catalog/library-scans.sqlite`, backed by persistent appdata.
-Each library path has its own records. Moving a library starts a new cache.
+Match results are stored per library in `plugins/bl_catalog/library-scans.sqlite` under
+Calibre's configuration directory. The active catalogue is also persistent, at
+`plugins/bl_catalog/catalogue.sqlite`. Existing generated temporary snapshots are migrated
+when available; custom snapshot paths are preserved.
 
-Opening the matcher restores unchanged books in a background job without contacting BLC.
-Saved results show their last check time and catalogue version; a background check enables Apply automatically.
-The first scan matches everything. Later scans compare current metadata with saved fingerprints,
-reuse unchanged results, match added/edited books, and remove deleted books from the saved list.
-Duplicate-work checks run over the combined results each time. Metadata options rebuild previews
-from cached work data. Manual picks persist and are revalidated when catalogue data changes.
+Opening the matcher restores unchanged saved books without polling BLC, downloading a
+snapshot or rematching the library. Apply is available for those matches immediately after
+loading. Metadata reads use Calibre's cached format list rather than checking every ebook
+file on disk. Newly added or edited books need Scan Selected or Scan Changes.
 
-**Scan Changes** checks BLC's catalogue version. Snapshot Mode automatically downloads a newer
-snapshot when needed; a new version rechecks all books, including previously unmatched titles.
-If BLC is unavailable, saved results remain viewable, but a fresh check cannot complete.
-**Force Full Rescan** bypasses saved automatic matches. Selected scans update only those books'
-records. Interrupted scans leave the previous saved results intact. Cache failures are shown in
-the status text and do not prevent a fresh scan. This database stores match results, not ebooks,
-credentials, or Calibre's own metadata database. Existing guarded Apply checks remain in place.
+Snapshot Mode keeps the same catalogue until you explicitly choose **Sync Snapshot** and
+confirm. Sync downloads and activates the latest snapshot in the background, keeps saved
+matches, and does not start a scan. Saved matches from an older catalogue are marked **Saved**;
+the tooltip identifies their version. Apply always rechecks only its requested books against
+the active catalogue, checks current metadata and duplicate claims, and verifies each write.
+Covers still download when requested. Live HTTP mode explicitly uses the live API instead.
+
+**Scan Changes** compares current library metadata with saved fingerprints. With the same
+snapshot it reuses unchanged results and matches only new/edited books. After you activate a
+new snapshot it rematches the requested books against that version. **Force Full Rescan**
+bypasses saved matches. Selected scans preserve other books' records. Deleted books are
+pruned; interrupted scans keep the previous cache. Filters and field toggles use loaded data.
+The snapshot title index resolves full normalized titles and aliases before loading work
+metadata, avoiding hundreds of unrelated candidates for titles starting with “The”.
 
 ## Compact results table
 
@@ -97,14 +102,3 @@ move into Already. Active filters remain in effect, so a successful book may lea
 view or disappear when stamped books are hidden. Clear Filters reveals all loaded rows again.
 Failed/rolled-back and unattempted books are not marked updated. Refresh/storage problems are
 reported separately from successful writes. No Apply writes occur when clearing filters.
-
-## Opening a previous scan
-
-Saved scans now check themselves automatically when the matcher opens. Existing matches
-are restored first, then a background delta check verifies live metadata/catalogue freshness
-for previously scanned IDs. Unchanged rows are reused; changed/outdated cached rows rematch.
-Apply becomes available when this finishes, without clicking Scan Selected or Scan Changes.
-The existing live write guards still run when Apply is confirmed. New unscanned books still
-need a first scan; opening an old scan does not silently start matching the rest of a library.
-If the check fails or is cancelled, saved rows remain visible and Apply stays blocked; use
-Scan Changes to retry. The status explains this rather than requiring a scan every session.

@@ -1,4 +1,15 @@
-# v1.2.4
+# v1.3.0-beta.1
+
+- Restore saved matches without automatic catalogue checks, downloads or library rematching.
+- Keep catalogue snapshots in persistent configuration; migrate generated temporary snapshots.
+- Make snapshot adoption explicit, confirmed and asynchronous from both entry points.
+- Keep saved matches usable after adoption; revalidate only requested books during Apply.
+- Read Calibre's cached format list instead of checking ebook files on disk for every metadata read.
+- Recognize the catalogue snapshot's actual version key.
+- Index exact normalized titles and aliases before loading work metadata, avoiding unrelated candidates and the old 200-candidate limit.
+- Preserve filter clearing, stamped-book filtering, post-Apply refresh and existing write guards.
+
+## v1.2.4
 
 - Check restored scan results automatically in the background when opening the matcher.
 - Enable Apply for validated saved matches without a manual Scan Selected/Scan Changes step.

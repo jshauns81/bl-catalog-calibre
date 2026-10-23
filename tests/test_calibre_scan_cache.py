@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations" / "calibre"))
 from bl_catalog_calibre.config import DEFAULTS, ApplyOptions
-from bl_catalog_calibre.dialog import ApplyRefused, DialogController
+from bl_catalog_calibre.dialog import DialogController
 from bl_catalog_calibre.scan_cache import ScanCache
 
 
@@ -59,9 +59,7 @@ def test_restart_restores_without_network_and_delta_reuses(setup):
     catalogue.fail = True
     second = factory()
     assert second.restore_cache()
-    assert second.cache_needs_check
-    with pytest.raises(ApplyRefused, match="Scan Changes"):
-        second.apply([1])
+    assert not second.cache_needs_check
     second.scan()
     assert not second.cache_needs_check
     assert second.scan_stats == {"reused": 1, "matched": 0}
@@ -170,7 +168,7 @@ def test_catalogue_refresh_revalidates_manual_picks(setup):
     assert factory().scan()[0]["picked"]
 
 
-def test_snapshot_checks_server_version_and_refreshes_before_delta(setup, monkeypatch):
+def test_scan_keeps_pinned_snapshot_without_remote_checks_or_downloads(setup, monkeypatch):
     from types import SimpleNamespace
 
     from bl_catalog_calibre import dialog
@@ -190,14 +188,14 @@ def test_snapshot_checks_server_version_and_refreshes_before_delta(setup, monkey
     ctl._injected_lookups = None
     catalogue.backend = old
     def sync():
-        catalogue.backend = new
-        catalogue.version = "two"
+        raise AssertionError("A scan must not download a snapshot")
+    old.http_client.fetch_version = lambda: (_ for _ in ()).throw(AssertionError("Unexpected remote version poll"))
     ctl.sync_snapshot = sync
     ctl.build_lookups = lambda: catalogue
     ctl.scan()
-    assert old.closed and new.closed
-    assert ctl.scan_stats == {"reused": 0, "matched": 1}
-    assert ctl.catalog_version == "two"
+    assert old.closed and not new.closed
+    assert ctl.scan_stats == {"reused": 1, "matched": 0}
+    assert ctl.catalog_version == "one"
 
 
 def test_transient_lookup_errors_are_retried(setup, monkeypatch):

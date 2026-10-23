@@ -118,7 +118,7 @@ class CalibreDbWriter:
             title = self.db.field_for("title", bid) or ""
             authors = list(self.db.field_for("authors", bid) or ())
             identifiers = dict(self.db.field_for("identifiers", bid) or {})
-            formats = list(self.db.formats(bid) or ())
+            formats = list(self.db.formats(bid, verify_formats=False) or ())
             series = self.db.field_for("series", bid) or ""
             series_index = self.db.field_for("series_index", bid)
             comments = self.db.field_for("comments", bid) or ""

@@ -27,7 +27,8 @@ class Database:
     def field_for(self, field, bid):
         return self.data[bid].get(field)
 
-    def formats(self, bid):
+    def formats(self, bid, verify_formats=True):
+        assert not verify_formats, "Metadata reads must not check ebook files on disk"
         return ("EPUB",)
 
     def set_field(self, field, values):

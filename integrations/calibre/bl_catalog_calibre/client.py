@@ -414,7 +414,8 @@ class HttpCatalogClient:
         if not version:
             conn = open_readonly_sqlite(target)
             try:
-                row = conn.execute("SELECT value FROM meta WHERE key='version'").fetchone()
+                row = conn.execute("SELECT value FROM meta WHERE key IN ('catalog_version', 'version') "
+                                   "ORDER BY key='catalog_version' DESC LIMIT 1").fetchone()
                 version = str(row[0]) if row else "local"
             except sqlite3.Error:
                 version = "local"
@@ -496,10 +497,12 @@ class SnapshotCatalogClient:
         if not self.snapshot_path.is_file():
             raise CatalogueError(f"Snapshot file not found: {self.snapshot_path}")
         self.http_client = http_client
+        self._title_index: dict[str, set[str]] | None = None
         self.conn = open_readonly_sqlite(self.snapshot_path)
         self.conn.create_function("fold", 1, norm, deterministic=True)
         try:
-            row = self.conn.execute("SELECT value FROM meta WHERE key='version'").fetchone()
+            row = self.conn.execute("SELECT value FROM meta WHERE key IN ('catalog_version', 'version') "
+                                    "ORDER BY key='catalog_version' DESC LIMIT 1").fetchone()
             self.version = str(row["value"]) if row and row["value"] else "snapshot"
         except sqlite3.Error as exc:
             self.conn.close()
@@ -842,23 +845,17 @@ class SnapshotCatalogClient:
         want = calibre_title_norm(plain_title(title))
         if not want:
             return self.version, []
-        tokens = [t for t in want.split() if len(t) > 1] or want.split()
-        if not tokens:
-            return self.version, []
-        token_like = f"%{tokens[0]}%"
-        candidate_ids: list[str] = []
-        seen: set[str] = set()
-        for r in self.conn.execute(
-            "SELECT id FROM work WHERE fold(title) LIKE ? "
-            "UNION SELECT work_id AS id FROM work_alias WHERE fold(title) LIKE ? LIMIT 200",
-            (token_like, token_like),
-        ):
-            wid = r["id"]
-            if wid not in seen:
-                seen.add(wid)
-                candidate_ids.append(wid)
+        if self._title_index is None:
+            index: dict[str, set[str]] = {}
+            for row in self.conn.execute(
+                "SELECT id, title FROM work UNION ALL SELECT work_id AS id, title FROM work_alias"
+            ):
+                key = calibre_title_norm(plain_title(row["title"]))
+                if key:
+                    index.setdefault(key, set()).add(row["id"])
+            self._title_index = index
         matches: list[dict[str, Any]] = []
-        for wid in candidate_ids:
+        for wid in sorted(self._title_index.get(want, ())):
             w = self._work_view(wid)
             if not w:
                 continue

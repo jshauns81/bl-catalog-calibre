@@ -21,6 +21,7 @@ from .config import (
     ApplyOptions,
     current_apply_options,
     get_prefs,
+    migrate_snapshot_path,
     update_prefs,
 )
 from .matcher import (
@@ -67,6 +68,7 @@ class DialogController:
         self.scan_cache = scan_cache
         self.scan_stats: dict[str, Any] = {}
         self.refresh_error = ""
+        self.snapshot_notice = ""
         self.cache_needs_check = False
         self.saved_book_ids: list[int] = []
         self._raw_rows: dict[int, dict[str, Any]] = {}
@@ -116,12 +118,21 @@ class DialogController:
             token=self.prefs.get("token"),
             timeout=float(self.prefs.get("timeout") or 10.0),
         )
-        snap_path = self.prefs.get("snapshot_path")
-        if self.prefs.get("mode") == "snapshot" and snap_path and Path(snap_path).is_file():
+        if self.prefs.get("mode") == "snapshot":
+            snap_path = self._snapshot_path()
+            if not Path(snap_path).is_file():
+                raise CatalogueError("No local snapshot. Choose Sync Snapshot to download one, or select Live HTTP mode.")
             snap_client = SnapshotCatalogClient(snap_path, http_client=http_client)
             self.catalog_version = snap_client.version
             return Lookups(snap_client)
         return Lookups(http_client)
+
+    def _snapshot_path(self) -> str:
+        path = migrate_snapshot_path(self.prefs.get("snapshot_path"))
+        if path != self.prefs.get("snapshot_path"):
+            self.prefs["snapshot_path"] = path
+            update_prefs({"snapshot_path": path})
+        return path
 
     def sync_snapshot(self) -> tuple[Path, str]:
         """Download ``/v1/snapshots/latest.sqlite`` to the configured ``snapshot_path``."""
@@ -130,7 +141,7 @@ class DialogController:
             token=self.prefs.get("token"),
             timeout=float(self.prefs.get("timeout") or 10.0),
         )
-        snap_path = self.prefs.get("snapshot_path") or "/tmp/bl-catalog-latest.sqlite"
+        snap_path = self._snapshot_path()
         target, version = http_client.download_snapshot(snap_path)
         self.prefs["mode"] = "snapshot"
         self.prefs["snapshot_path"] = str(target)
@@ -139,11 +150,17 @@ class DialogController:
         return target, version
 
     def _cache_scope(self) -> str:
-        return json.dumps([MATCHER_REVISION, self.prefs.get("url"), self.prefs.get("mode"),
-                           self.prefs.get("snapshot_path")], sort_keys=True)
+        return json.dumps([MATCHER_REVISION, self.prefs.get("url"), self.prefs.get("mode")], sort_keys=True)
+
+    def _same_cache_scope(self, stored: str) -> bool:
+        try:
+            old = json.loads(stored)
+            return isinstance(old, list) and old[:3] == json.loads(self._cache_scope())
+        except (TypeError, ValueError):
+            return False
 
     def restore_cache(self) -> bool:
-        """Restore unchanged books without contacting BLC; require a version check before Apply."""
+        """Restore unchanged local books; Apply independently checks its selected targets."""
         if self.scan_cache is None:
             return False
         records = self.scan_cache.load()
@@ -152,16 +169,32 @@ class DialogController:
         self.books_by_id = {int(b["id"]): b for b in self.books}
         self._raw_rows = {
             bid: copy.deepcopy(entry["row"]) for bid, entry in records.items()
-            if bid in self.books_by_id and entry["scope"] == self._cache_scope()
+            if bid in self.books_by_id and self._same_cache_scope(entry["scope"])
             and entry["fingerprint"] == fingerprint(self.books_by_id[bid])
         }
+        for bid, row in self._raw_rows.items():
+            row["matched_catalog_version"] = records[bid]["version"]
         self.rows = list(copy.deepcopy(self._raw_rows).values())
         self.set_options(self.options)
         demote_shared(self.rows)
-        self.cache_needs_check = bool(self.rows)
+        self.cache_needs_check = False
         dates = [records[int(r["id"])]["scanned_at"] for r in self.rows]
         versions = {records[int(r["id"])]["version"] for r in self.rows}
         self.catalog_version = next(iter(versions)) if len(versions) == 1 else None
+        self.snapshot_notice = ""
+        if self._injected_lookups is not None:
+            self.catalog_version = self._injected_lookups.version or self.catalog_version
+        elif self.prefs.get("mode") == "snapshot":
+            try:
+                path = self._snapshot_path()
+                if Path(path).is_file():
+                    snapshot = SnapshotCatalogClient(path)
+                    self.catalog_version = snapshot.version
+                    snapshot.close()
+                else:
+                    self.snapshot_notice = "No local snapshot. Sync Snapshot once, or select Live HTTP before applying."
+            except (CatalogueError, OSError) as exc:
+                self.snapshot_notice = f"Local snapshot unavailable: {exc}. Use Sync Snapshot to replace it."
         self.scan_stats = {"saved_at": max(dates) if dates else ""}
         return bool(self.rows)
 
@@ -179,16 +212,6 @@ class DialogController:
         target_books = [b for b in all_books if int(b["id"]) in wanted]
         lookups = self.build_lookups()
         backend = getattr(lookups, "backend", None)
-        if self._injected_lookups is None and isinstance(backend, SnapshotCatalogClient):
-            try:
-                if backend.http_client and backend.http_client.fetch_version() != backend.version:
-                    backend.close()
-                    self.sync_snapshot()
-                    lookups = self.build_lookups()
-                    backend = getattr(lookups, "backend", None)
-            except BaseException:
-                backend.close()
-                raise
         if isinstance(backend, HttpCatalogClient):
             version = backend.fetch_version()
         else:
@@ -201,20 +224,21 @@ class DialogController:
             for n, book in enumerate(target_books, 1):
                 bid = int(book["id"])
                 entry = records.get(bid)
-                if (not force and version and entry and entry["scope"] == scope
+                if (not force and version and entry and self._same_cache_scope(entry["scope"])
                         and entry["version"] == version
                         and entry["fingerprint"] == fingerprint(book)):
                     row = copy.deepcopy(entry["row"])
                     reused += 1
                 else:
                     row = run_scan([book], lookups, options=self.options, deduplicate=False)[0]
-                    if (entry and entry["scope"] == scope and entry["row"].get("picked")
+                    if (entry and self._same_cache_scope(entry["scope"]) and entry["row"].get("picked")
                             and entry["fingerprint"] == fingerprint(book) and row["bucket"] != "error"):
                         picked_work = lookups.work(entry["row"].get("work_id") or "")
                         if picked_work:
                             apply_manual_pick(row, book, picked_work, self.options)
                     if version and lookups.version and lookups.version != version:
                         raise CatalogueError("BLC changed during the scan. Run Scan Changes again.")
+                row["matched_catalog_version"] = version or lookups.version
                 raw_rows.append(row)
                 if progress:
                     progress(n, len(target_books), row)
@@ -392,6 +416,7 @@ class DialogController:
             if row["bucket"] == "error":
                 raise CatalogueError(row.get("reason") or "Could not refresh a written book")
             row["applied_at"] = result.get("at", "")
+            row["matched_catalog_version"] = self.catalog_version
             row["updated_fields"] = list(result.get("fields_updated") or [])
             if result.get("added"):
                 row["updated_fields"].insert(0, "identifiers")
@@ -959,33 +984,22 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
         def _after_restore(self, restored: bool) -> None:
             if restored:
                 self._after_scan()
-            if controller.saved_book_ids:
-                self.hero_state.setText("Checking saved results automatically…")
-                self.hero_sub.setText("Reusing unchanged matches; checking metadata and catalogue freshness.")
-                self.progress.setValue(0)
-                self.apply_btn.setEnabled(False)
-
-                def progress(done: int, total: int, _row: dict[str, Any]) -> None:
-                    if self._cancel.is_set():
-                        raise OperationCancelled()
-                    self._bridge.progressed.emit(done, total)
-
-                self._start_job(
-                    "Saved results check",
-                    lambda: controller.scan(controller.saved_book_ids, progress=progress),
-                    lambda _rows: self._after_scan(),
-                    cancellable=True,
+                self.hero_state.setText(f"{len(controller.rows)} saved matches ready")
+                notice = controller.snapshot_notice or (
+                    "Saved matches kept. Apply rechecks only selected books. Snapshot updates are manual."
                 )
+                self.hero_sub.setText(notice)
             elif controller.scan_cache and controller.scan_cache.error:
                 self.hero_sub.setText("Saved scan unavailable; scan again. " + controller.scan_cache.error)
+            elif controller.saved_book_ids:
+                self.hero_state.setText("Saved books changed; scan the selected books to refresh them")
 
         def _on_mode_changed(self) -> None:
             controller.prefs["mode"] = self.mode_combo.currentData()
             update_prefs({"mode": controller.prefs["mode"]})
             if controller.rows:
-                controller.cache_needs_check = True
-                self.apply_btn.setEnabled(False)
-                self.hero_state.setText("Catalogue mode changed; run Scan Changes before applying")
+                self.hero_sub.setText("Source changed. Saved matches are kept; Apply rechecks selected books.")
+                self._update_apply_label()
 
         def _on_plugin_updates(self) -> None:
             from .update_ui import create_update_dialog
@@ -1041,9 +1055,6 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.cancel_btn.setEnabled(False)
             if not ok and self._job_title == "Scan":
                 self._populate_table()
-            if not ok and self._job_title == "Saved results check":
-                self.hero_state.setText("Saved results could not be checked")
-                self.hero_sub.setText("Saved rows remain visible. Use Scan Changes to retry before applying.")
             if not ok and self._job_title == "BLC Search":
                 self.pick_status.setText("Search failed. Check the catalogue connection and try again.")
             if ok:
@@ -1081,17 +1092,24 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             super().closeEvent(event)
 
         def _on_sync_snapshot(self) -> None:
-            self.hero_state.setText("Downloading latest BLC snapshot\u2026")
+            answer = QMessageBox.question(
+                self, "Update Local BLC Snapshot",
+                "Download and activate the latest catalogue snapshot?\n\n"
+                "Your saved matches will be kept. This will not start a library scan.\n"
+                "Apply rechecks the books you choose against the active snapshot.",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self.hero_state.setText("Downloading latest BLC snapshot…")
 
             def _done(result: tuple[Path, str]) -> None:
                 target, ver = result
                 update_prefs({"mode": "snapshot", "snapshot_path": str(target)})
                 self.mode_combo.setCurrentIndex(0)
-                self.version_lbl.setText(f"snapshot \u00b7 {ver}")
-                controller.cache_needs_check = bool(controller.rows)
-                self.apply_btn.setEnabled(False)
-                self.hero_state.setText(f"Snapshot {ver} synced; run Scan Changes")
-                self.hero_sub.setText(f"Saved to {target}")
+                controller.cache_needs_check = False
+                self._after_scan()
+                self.hero_state.setText(f"Snapshot {ver} active; saved matches kept")
+                self.hero_sub.setText(f"Saved to {target}. Apply checks selected books; Scan Changes refreshes previews.")
 
             self._start_job("Snapshot Sync", controller.sync_snapshot, _done, cancellable=False)
 
@@ -1216,6 +1234,10 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
         def _proposal_tooltip(self, row: dict[str, Any]) -> str:
             identifiers = [f"{k}: {v}" for k, v in sorted((row.get("add") or {}).items())]
             lines = [*identifiers, self._proposal_text(row)]
+            if row.get("matched_catalog_version"):
+                lines.append(f"Saved match catalogue: {row['matched_catalog_version']}")
+                lines.append(f"Active catalogue: {controller.catalog_version or 'checked on Apply'}")
+                lines.append("Selected books are rechecked before writing.")
             if row.get("applied_at"):
                 lines.append(f"Updated: {row['applied_at']}")
                 lines.append("Fields written: " + ", ".join(row.get("updated_fields") or []))
@@ -1255,7 +1277,11 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                 self.table.setItem(r_idx, 2, QTableWidgetItem(author_text))
 
                 b_style = BUCKET_STYLE.get(row["bucket"], BUCKET_STYLE["not_in_blc"])
-                b_item = QTableWidgetItem(b_style["label"])
+                label = b_style["label"]
+                matched_version = row.get("matched_catalog_version")
+                if matched_version and controller.catalog_version and matched_version != controller.catalog_version:
+                    label = "Saved · " + label
+                b_item = QTableWidgetItem(label)
                 self.table.setItem(r_idx, 3, b_item)
 
                 wid_text = str(row.get("work_id") or "None")
@@ -1266,6 +1292,8 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                 for column in range(self.table.columnCount()):
                     item = self.table.item(r_idx, column)
                     tooltip = authors if column == 2 else item.text()
+                    if column == 3 and matched_version:
+                        tooltip += f"\nMatched against catalogue {matched_version}. Rechecked on Apply."
                     if column == 5:
                         tooltip = self._proposal_tooltip(row)
                     item.setToolTip(tooltip)

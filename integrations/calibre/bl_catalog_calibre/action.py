@@ -7,9 +7,7 @@ dialog, syncing the local SQLite snapshot, or configuring preferences.
 
 from __future__ import annotations
 
-from .apply import CalibreDbWriter
-from .dialog import DialogController, create_blc_dialog
-from .matcher import CatalogueError
+from .dialog import create_blc_dialog
 
 try:
     from calibre.gui2.actions import InterfaceAction as CalibreInterfaceAction  # type: ignore[import-not-found]
@@ -97,29 +95,18 @@ class BLCatalogAction(CalibreInterfaceAction):
         dlg.exec()
 
     def sync_snapshot_now(self) -> None:
-        try:
-            from calibre.gui2 import error_dialog, info_dialog  # type: ignore[import-not-found]
-        except ImportError:
-            info_dialog = error_dialog = None
-        try:
-            writer = CalibreDbWriter(self.gui.current_db.new_api)
-            ctl = DialogController(writer)
-            target, version = ctl.sync_snapshot()
-            if info_dialog is not None:
-                info_dialog(
-                    self.gui,
-                    "BL-Catalog Snapshot Synced",
-                    f"Downloaded snapshot {version} to {target}",
-                    show=True,
-                )
-        except (CatalogueError, OSError, ValueError) as exc:
-            if error_dialog is not None:
-                error_dialog(
-                    self.gui,
-                    "BL-Catalog Snapshot Error",
-                    str(exc),
-                    show=True,
-                )
+        dlg = create_blc_dialog(self.gui, icon=_load_plugin_icon(), selected_ids=self._selected_book_ids())
+        # Use the dialog's confirmation and worker rather than downloading on the GUI thread.
+        from qt.core import QTimer
+
+        def sync_when_ready() -> None:
+            if dlg._busy:
+                QTimer.singleShot(100, sync_when_ready)
+            else:
+                dlg._on_sync_snapshot()
+
+        QTimer.singleShot(0, sync_when_ready)
+        dlg.exec()
 
     def show_configuration(self) -> None:
         self.interface_action_base_plugin.do_user_config(self.gui)

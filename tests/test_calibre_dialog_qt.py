@@ -265,7 +265,7 @@ def test_saved_library_is_automatically_ready_without_scan_click(qt_app, tmp_pat
             assert not controller.cache_needs_check
             assert not dialog.pick_apply_btn.isEnabled()
             assert dialog.apply_btn.isEnabled()
-            assert "1 cached, 0 rematched" in dialog.hero_sub.text()
+            assert "Snapshot updates are manual" in dialog.hero_sub.text()
             assert catalogue.calls == 1
         finally:
             dialog.close()
@@ -359,8 +359,8 @@ def test_apply_refresh_and_clear_filters_without_rescan(qt_app, tmp_path):
             gui.close()
 
 
-@pytest.mark.parametrize("scenario", ["changed", "offline", "waiting", "cancelled"])
-def test_automatic_saved_check_handles_changes_and_blocks_unverified_apply(qt_app, tmp_path, scenario):
+@pytest.mark.parametrize("scenario", ["version_changed", "offline", "edited", "deleted"])
+def test_saved_matches_do_not_poll_download_or_rematch_on_open(qt_app, tmp_path, scenario):
     from bl_catalog_calibre.scan_cache import ScanCache
     from test_calibre_scan_cache import Catalogue, Library
 
@@ -371,19 +371,14 @@ def test_automatic_saved_check_handles_changes_and_blocks_unverified_apply(qt_ap
     )
     controller.scan()
     controller.rows = []
-    gate = threading.Event()
-    started = threading.Event()
-    if scenario == "changed":
-        library.books[0]["tags"] = ["Edited outside plugin"]
-    else:
-        original = controller.build_lookups
-        def build():
-            started.set()
-            if scenario == "offline":
-                raise RuntimeError("BLC unavailable")
-            gate.wait(5)
-            return original()
-        controller.build_lookups = build
+    if scenario == "version_changed":
+        catalogue.version = "new"
+    elif scenario == "edited":
+        library.books[0]["tags"] = ["Edited"]
+    elif scenario == "deleted":
+        library.books.clear()
+    catalogue.fail = True
+    controller.build_lookups = lambda: (_ for _ in ()).throw(AssertionError("Unexpected lookup on open"))
     qt = {
         name: getattr(module, name)
         for module in (QtCore, QtGui, QtWidgets)
@@ -403,31 +398,68 @@ def test_automatic_saved_check_handles_changes_and_blocks_unverified_apply(qt_ap
             deadline = time.monotonic() + 5
             while dialog._busy and time.monotonic() < deadline:
                 qt_app.processEvents()
-                if scenario in ("waiting", "cancelled") and started.is_set() and not gate.is_set():
-                    assert dialog._busy
-                    assert not dialog.apply_btn.isEnabled()
-                    assert "automatically" in dialog.hero_state.text()
-                    if scenario == "cancelled":
-                        dialog._on_cancel()
-                    gate.set()
                 time.sleep(0.005)
             assert not dialog._busy
-            assert dialog.table.rowCount() == 1
-            if scenario in ("offline", "cancelled"):
-                assert controller.cache_needs_check
-                assert not dialog.apply_btn.isEnabled()
-                if scenario == "offline":
-                    assert warning.called
-                    assert "could not be checked" in dialog.hero_state.text()
-                else:
-                    assert "cancelled" in dialog.hero_state.text()
-            else:
-                assert not controller.cache_needs_check
-                assert dialog.apply_btn.isEnabled()
-                assert catalogue.calls == (2 if scenario == "changed" else 1)
-                if scenario == "changed":
-                    assert controller.books_by_id[1]["tags"] == ["Edited outside plugin"]
+            assert not warning.called
+            assert catalogue.calls == 1
+            unchanged = scenario in ("version_changed", "offline")
+            assert dialog.table.rowCount() == (1 if unchanged else 0)
+            assert dialog.apply_btn.isEnabled() == unchanged
+            if scenario == "version_changed":
+                assert dialog.table.item(0, 3).text().startswith("Saved · ")
+                assert "Saved match catalogue: one" in dialog.table.item(0, 5).toolTip()
         finally:
-            gate.set()
+            dialog.close()
+            gui.close()
+
+
+def test_sync_requires_confirmation_and_keeps_saved_apply_ready(qt_app, tmp_path):
+    from test_calibre_apply_refresh import make_controller
+
+    controller, _database, catalogue = make_controller(tmp_path)
+    qt = {
+        name: getattr(module, name)
+        for module in (QtCore, QtGui, QtWidgets)
+        for name in dir(module)
+        if name.startswith("Q") or name == "pyqtSignal"
+    }
+    gui = QtWidgets.QWidget()
+    gui.current_db = SimpleNamespace(new_api=object())
+    downloads = []
+    def sync():
+        downloads.append(True)
+        controller.catalog_version = "two"
+        return tmp_path / "snapshot.sqlite", "two"
+    controller.sync_snapshot = sync
+    with (
+        patch.object(plugin_dialog, "_import_qt", return_value=qt),
+        patch.object(plugin_dialog, "CalibreDbWriter", return_value=controller.writer),
+        patch.object(plugin_dialog, "DialogController", return_value=controller),
+        patch.object(plugin_dialog, "update_prefs"),
+        patch.object(QtWidgets.QMessageBox, "question") as question,
+    ):
+        dialog = plugin_dialog.create_blc_dialog(gui)
+        try:
+            deadline = time.monotonic() + 5
+            while dialog._busy and time.monotonic() < deadline:
+                qt_app.processEvents()
+                time.sleep(0.005)
+            before = controller.scan_cache.load()
+            calls = catalogue.calls
+            question.return_value = QtWidgets.QMessageBox.StandardButton.No
+            dialog._on_sync_snapshot()
+            assert not downloads and not dialog._busy
+            question.return_value = QtWidgets.QMessageBox.StandardButton.Yes
+            dialog._on_sync_snapshot()
+            while dialog._busy and time.monotonic() < deadline:
+                qt_app.processEvents()
+                time.sleep(0.005)
+            assert not dialog._busy
+            assert len(downloads) == 1
+            assert dialog.apply_btn.isEnabled()
+            assert catalogue.calls == calls
+            assert controller.scan_cache.load() == before
+            assert "saved matches kept" in dialog.hero_state.text()
+        finally:
             dialog.close()
             gui.close()

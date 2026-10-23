@@ -32,6 +32,7 @@ from .config import (
     ApplyOptions,
     current_apply_options,
     get_prefs,
+    migrate_snapshot_path,
     update_prefs,
 )
 from .dialog import BLCatalogConfigWidget, DialogController
@@ -99,6 +100,14 @@ class BLCatalogPlugin(_CalibrePluginBase):
         super_init = getattr(super(), "initialize", None)
         if callable(super_init):
             super_init()
+        previous = get_prefs().get("snapshot_path")
+        try:
+            snapshot = migrate_snapshot_path(previous)
+            if snapshot != previous:
+                update_prefs({"snapshot_path": snapshot})
+        except OSError:
+            # Loading the plugin must remain possible when its snapshot cannot be copied.
+            pass
         self._register_metadata_source()
 
     def _register_metadata_source(self) -> BLCatalogMetadataSource | None:

@@ -32,7 +32,6 @@ from .config import (
     ApplyOptions,
     current_apply_options,
     get_prefs,
-    migrate_snapshot_path,
     update_prefs,
 )
 from .dialog import BLCatalogConfigWidget, DialogController
@@ -68,6 +67,7 @@ from .matcher import (
     valid_isbn,
     write_csv,
 )
+from .snapshot import migrate_snapshot_path
 from .source import BLCatalogMetadataSource, work_to_calibre_metadata
 from .style import BUCKET_STYLE, TOKENS, build_stylesheet, render_work_detail_html
 from .version import MINIMUM_CALIBRE_VERSION, PLUGIN_VERSION

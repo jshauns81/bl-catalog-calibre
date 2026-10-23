@@ -21,7 +21,6 @@ from .config import (
     ApplyOptions,
     current_apply_options,
     get_prefs,
-    migrate_snapshot_path,
     update_prefs,
 )
 from .matcher import (
@@ -38,6 +37,7 @@ from .matcher import (
     write_csv,
 )
 from .scan_cache import MATCHER_REVISION, ScanCache, default_cache_path, fingerprint
+from .snapshot import migrate_snapshot_path
 from .style import BUCKET_STYLE, build_stylesheet, render_work_detail_html
 
 

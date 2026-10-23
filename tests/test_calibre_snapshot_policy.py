@@ -5,7 +5,7 @@ import json
 import sqlite3
 
 import pytest
-from bl_catalog_calibre import config
+from bl_catalog_calibre import config, snapshot
 from bl_catalog_calibre.client import SnapshotCatalogClient
 from bl_catalog_calibre.dialog import DialogController
 from bl_catalog_calibre.matcher import CatalogueError
@@ -33,17 +33,17 @@ def test_legacy_snapshot_is_copied_once_and_never_overwrites_pinned_data(tmp_pat
     legacy = tmp_path / "calibre-old/bl-catalog-latest.sqlite"
     legacy.parent.mkdir()
     legacy.write_bytes(b"old snapshot")
-    monkeypatch.setattr(config, "DEFAULT_SNAPSHOT_PATH", str(target))
-    monkeypatch.setattr(config.tempfile, "gettempdir", lambda: str(tmp_path))
-    assert config.migrate_snapshot_path(legacy) == str(target)
+    monkeypatch.setattr(snapshot, "DEFAULT_SNAPSHOT_PATH", str(target))
+    monkeypatch.setattr(snapshot.tempfile, "gettempdir", lambda: str(tmp_path))
+    assert snapshot.migrate_snapshot_path(legacy) == str(target)
     assert target.read_bytes() == legacy.read_bytes() == b"old snapshot"
     target.write_bytes(b"pinned snapshot")
-    assert config.migrate_snapshot_path(legacy) == str(target)
+    assert snapshot.migrate_snapshot_path(legacy) == str(target)
     assert target.read_bytes() == b"pinned snapshot"
     legacy.unlink()
-    assert config.migrate_snapshot_path(legacy) == str(target)
+    assert snapshot.migrate_snapshot_path(legacy) == str(target)
     custom = tmp_path / "custom.sqlite"
-    assert config.migrate_snapshot_path(custom) == str(custom)
+    assert snapshot.migrate_snapshot_path(custom) == str(custom)
 
 
 def test_legacy_cache_scope_survives_snapshot_path_migration(setup):

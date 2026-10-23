@@ -1,5 +1,6 @@
-# v1.3.0-beta.1
+# v1.3.0-beta.2
 
+- Fix installing over a running older plugin by isolating snapshot migration from cached modules.
 - Restore saved matches without automatic catalogue checks, downloads or library rematching.
 - Keep catalogue snapshots in persistent configuration; migrate generated temporary snapshots.
 - Make snapshot adoption explicit, confirmed and asynchronous from both entry points.

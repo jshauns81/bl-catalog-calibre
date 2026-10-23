@@ -83,3 +83,17 @@ Long text uses an ellipsis; hover for the full value, or select a row for the fu
 Enable **Show work ID and reason columns** for those extra columns. Column borders remain
 resizable, and the divider between results and inspector can be dragged. Column widths do
 not scan library contents during window resizing; rows stay single-line for predictable redraws.
+
+## Filters and results after Apply
+
+**Clear Filters** resets the bucket to All, clears search and turns off **Hide BLC-stamped books**.
+The search field also has a clear icon. These controls only filter loaded rows; no scan is needed.
+The hide toggle persists across dialog opens and hides books with an existing bl_catalog identifier.
+
+After Apply, the plugin rereads live metadata and reclassifies only successful books, updates
+bucket counts and proposals, and saves those refreshed rows to the persistent cache. Successful
+rows show **Updated** with a timestamp and written fields in the tooltip. Newly stamped books
+move into Already. Active filters remain in effect, so a successful book may leave a Certain
+view or disappear when stamped books are hidden. Clear Filters reveals all loaded rows again.
+Failed/rolled-back and unattempted books are not marked updated. Refresh/storage problems are
+reported separately from successful writes. No Apply writes occur when clearing filters.

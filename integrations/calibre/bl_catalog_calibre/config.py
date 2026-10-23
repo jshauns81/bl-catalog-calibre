@@ -36,6 +36,7 @@ DEFAULTS: dict[str, Any] = {
     "apply_tags": False,
     "apply_cover": False,
     "update_channel": "stable",
+    "hide_stamped": False,
 }
 
 

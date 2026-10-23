@@ -1,4 +1,13 @@
-# v1.2.2
+# v1.2.3
+
+- Add Clear Filters and a search clear icon; resetting filters does not scan the library.
+- Add a persistent Hide BLC-stamped books toggle.
+- Refresh written metadata, buckets, proposals and the saved cache immediately after Apply.
+- Mark successful rows Updated, with the time and written fields in the tooltip.
+- Preserve active filters and show refresh/cache failures separately from write results.
+- Keep failed/rolled-back and unattempted books unmarked.
+
+## v1.2.2
 
 - Replace content-sized columns with stable widths and a stretching title column to reduce
   resize work on large libraries.

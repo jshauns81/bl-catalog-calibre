@@ -66,6 +66,7 @@ class DialogController:
         self.writer = writer
         self.scan_cache = scan_cache
         self.scan_stats: dict[str, Any] = {}
+        self.refresh_error = ""
         self.cache_needs_check = False
         self._raw_rows: dict[int, dict[str, Any]] = {}
         self.prefs = dict(prefs if prefs is not None else get_prefs())
@@ -76,6 +77,7 @@ class DialogController:
         self.rows: list[dict[str, Any]] = []
         self.bucket_filter: str = "all"
         self.search_filter: str = ""
+        self.hide_stamped = bool(self.prefs.get("hide_stamped", False))
         self.catalog_version: str | None = None
 
     def set_options(self, options: ApplyOptions) -> None:
@@ -242,6 +244,8 @@ class DialogController:
         q = self.search_filter.strip().lower()
         out: list[dict[str, Any]] = []
         for row in self.rows:
+            if self.hide_stamped and row.get("bl_catalog"):
+                continue
             if self.bucket_filter != "all" and row.get("bucket") != self.bucket_filter:
                 continue
             if q:
@@ -253,6 +257,11 @@ class DialogController:
                     continue
             out.append(row)
         return out
+
+    def clear_filters(self) -> None:
+        self.bucket_filter = "all"
+        self.search_filter = ""
+        self.hide_stamped = False
 
     def search_blc(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         lookups = self.build_lookups()
@@ -335,16 +344,66 @@ class DialogController:
             })
 
         lookups = self.build_lookups()
-        return apply_matches(
-            targets,
-            max_books=cap,
-            books=all_books,
-            lookups=lookups,
-            writer=self.writer,
-            log_path=log,
-            options=self.options,
-            should_stop=should_stop,
-        )
+        try:
+            results = apply_matches(
+                targets,
+                max_books=cap,
+                books=all_books,
+                lookups=lookups,
+                writer=self.writer,
+                log_path=log,
+                options=self.options,
+                should_stop=should_stop,
+            )
+            self.refresh_error = ""
+            try:
+                self._refresh_written_rows(results, lookups)
+            except Exception as exc:  # noqa: BLE001 - writes already succeeded; report refresh separately
+                self.refresh_error = str(exc) or type(exc).__name__
+            return results
+        finally:
+            backend = getattr(lookups, "backend", None)
+            if self._injected_lookups is None and isinstance(backend, SnapshotCatalogClient):
+                backend.close()
+
+    def _refresh_written_rows(self, results: list[dict[str, Any]], lookups: Any) -> None:
+        written = [result for result in results if result["status"] == "written"]
+        if not written:
+            return
+        self.catalog_version = lookups.version or self.catalog_version
+        fresh_books = self.writer.read_books(None)
+        fresh_by_id = {int(book["id"]): book for book in fresh_books}
+        raw = {int(row["id"]): copy.deepcopy(self._raw_rows.get(int(row["id"]), row))
+               for row in self.rows if int(row["id"]) in fresh_by_id}
+        refreshed = []
+        for result in written:
+            bid = int(result["id"])
+            if bid not in fresh_by_id:
+                continue
+            book = fresh_by_id[bid]
+            row = run_scan([book], lookups, options=self.options, deduplicate=False)[0]
+            old = raw.get(bid, {})
+            if old.get("picked") and not (book.get("identifiers") or {}).get("bl_catalog"):
+                work = lookups.work(result["work_id"])
+                if work:
+                    apply_manual_pick(row, book, work, self.options)
+            if row["bucket"] == "error":
+                raise CatalogueError(row.get("reason") or "Could not refresh a written book")
+            row["applied_at"] = result.get("at", "")
+            row["updated_fields"] = list(result.get("fields_updated") or [])
+            if result.get("added"):
+                row["updated_fields"].insert(0, "identifiers")
+            raw[bid] = row
+            refreshed.append(row)
+        self.books = fresh_books
+        self.books_by_id = fresh_by_id
+        self._raw_rows = raw
+        self.rows = copy.deepcopy(list(raw.values()))
+        self.set_options(self.options)
+        demote_shared(self.rows)
+        if self.scan_cache is not None and self.catalog_version:
+            self.scan_cache.save(fresh_by_id, refreshed, self._cache_scope(),
+                                 self.catalog_version, set(fresh_by_id))
 
 
 def _import_qt():
@@ -645,6 +704,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.filter_edit = QLineEdit()
             self.filter_edit.setPlaceholderText("Filter books, authors, ISBN, or work ID\u2026")
             self.filter_edit.setMinimumWidth(280)
+            self.filter_edit.setClearButtonEnabled(True)
             self.filter_edit.textChanged.connect(self._on_filter_changed)
             hbar.addWidget(self.filter_edit)
 
@@ -774,7 +834,17 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.table_empty_lbl.setWordWrap(True)
             self.details_columns = QCheckBox("Show work ID and reason columns")
             self.details_columns.toggled.connect(self._on_detail_columns)
-            table_layout.addWidget(self.details_columns)
+            table_controls = QHBoxLayout()
+            self.clear_filters_btn = QPushButton("Clear Filters")
+            self.clear_filters_btn.clicked.connect(self._clear_filters)
+            table_controls.addWidget(self.clear_filters_btn)
+            self.hide_stamped_chk = QCheckBox("Hide BLC-stamped books")
+            self.hide_stamped_chk.setChecked(controller.hide_stamped)
+            self.hide_stamped_chk.toggled.connect(self._on_hide_stamped)
+            table_controls.addWidget(self.hide_stamped_chk)
+            table_controls.addWidget(self.details_columns)
+            table_controls.addStretch(1)
+            table_layout.addLayout(table_controls)
             table_layout.addWidget(self.table_empty_lbl)
             table_layout.addWidget(self.table, 1)
             splitter.addWidget(table_panel)
@@ -1033,6 +1103,23 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             controller.search_filter = text
             self._populate_table()
 
+        def _clear_filters(self) -> None:
+            controller.clear_filters()
+            self.filter_edit.blockSignals(True)
+            self.filter_edit.clear()
+            self.filter_edit.blockSignals(False)
+            self.hide_stamped_chk.blockSignals(True)
+            self.hide_stamped_chk.setChecked(False)
+            self.hide_stamped_chk.blockSignals(False)
+            update_prefs({"hide_stamped": False})
+            self.table.clearSelection()
+            self._set_bucket("all")
+
+        def _on_hide_stamped(self, checked: bool) -> None:
+            controller.hide_stamped = checked
+            update_prefs({"hide_stamped": checked})
+            self._populate_table()
+
         def _run_scan(self, *, selected_only: bool, force: bool = False) -> None:
             ids = self._selected_ids if selected_only else None
             self.hero_state.setText("Scanning books against BL-Catalog\u2026")
@@ -1107,11 +1194,16 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             for field in ("title", "authors", "series", "synopsis", "tags", "cover"):
                 if field in (row.get("proposals") or {}):
                     parts.append(f"+{field}")
-            return ", ".join(parts) or "No changes"
+            text = ", ".join(parts) or "No changes"
+            return f"Updated · {text}" if row.get("applied_at") else text
 
         def _proposal_tooltip(self, row: dict[str, Any]) -> str:
             identifiers = [f"{k}: {v}" for k, v in sorted((row.get("add") or {}).items())]
-            return "\n".join([*identifiers, self._proposal_text(row)])
+            lines = [*identifiers, self._proposal_text(row)]
+            if row.get("applied_at"):
+                lines.append(f"Updated: {row['applied_at']}")
+                lines.append("Fields written: " + ", ".join(row.get("updated_fields") or []))
+            return "\n".join(lines)
 
         def _populate_table_items(self, *, proposals_only: bool = False) -> None:
             keep = self._selected_bids()
@@ -1126,7 +1218,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                         item.setToolTip(self._proposal_tooltip(row))
                 return
             if controller.rows:
-                empty_message = "No books match these filters. Choose All or change the filter text."
+                empty_message = "No books match these filters. Use Clear Filters to show the loaded books."
             elif self._scan_completed:
                 empty_message = "No books were found in this scan. Add books in Calibre or scan the full library."
             else:
@@ -1183,6 +1275,12 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
 
         def _update_apply_label(self) -> None:
             selected = self._selected_bids()
+            visible = sum(1 for r in controller.filtered_rows() if is_applicable(r))
+            if not self._busy:
+                selected_ready = any(int(row["id"]) in selected and is_applicable(row)
+                                     for row in controller.filtered_rows())
+                self.apply_btn.setEnabled(not controller.cache_needs_check
+                                          and bool(selected_ready if selected else visible))
             if selected:
                 self.apply_btn.setText(f"Apply Selected ({len(selected)})")
             else:
@@ -1329,6 +1427,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             )
 
         def _after_apply(self, results: list[dict[str, Any]]) -> None:
+            self._after_scan()
             counts = collections.Counter(r["status"] for r in results)
             not_attempted = max(0, getattr(self, "_apply_target_count", len(results)) - len(results))
             self.hero_state.setText(
@@ -1350,7 +1449,12 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                     f"{counts['written']} books written; {not_attempted} not attempted.\n"
                     "Earlier successful writes remain saved. See the audit log for details.",
                 )
-            self.hero_sub.setText(f"Audit log: {controller.prefs.get('log_path')} \u00b7 rescan to refresh rows")
+            detail = "Table and saved results refreshed."
+            if controller.refresh_error:
+                detail = "Writes completed, but table refresh failed: " + controller.refresh_error
+            elif controller.scan_cache and controller.scan_cache.error:
+                detail = "Table refreshed; cache save failed: " + controller.scan_cache.error
+            self.hero_sub.setText(f"{detail} Audit log: {controller.prefs.get('log_path')}")
             with contextlib.suppress(AttributeError, RuntimeError, TypeError):
                 gui.library_view.model().refresh_ids([r["id"] for r in results if r["status"] == "written"])
 

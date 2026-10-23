@@ -307,3 +307,56 @@ def test_apply_failure_shows_book_error_and_unattempted_count(qt_app):
         finally:
             dialog.close()
             gui.close()
+
+
+def test_apply_refresh_and_clear_filters_without_rescan(qt_app, tmp_path):
+    from test_calibre_apply_refresh import make_controller
+
+    controller, _database, catalogue = make_controller(tmp_path)
+    qt = {
+        name: getattr(module, name)
+        for module in (QtCore, QtGui, QtWidgets)
+        for name in dir(module)
+        if name.startswith("Q") or name == "pyqtSignal"
+    }
+    gui = QtWidgets.QWidget()
+    gui.current_db = SimpleNamespace(new_api=object())
+    # Cache restoration is tested separately; start from the completed scan here.
+    cache = controller.scan_cache
+    controller.scan_cache = None
+    with (
+        patch.object(plugin_dialog, "_import_qt", return_value=qt),
+        patch.object(plugin_dialog, "CalibreDbWriter", return_value=controller.writer),
+        patch.object(plugin_dialog, "DialogController", return_value=controller),
+        patch.object(plugin_dialog, "update_prefs"),
+        patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.StandardButton.Yes),
+    ):
+        dialog = plugin_dialog.create_blc_dialog(gui)
+        controller.scan_cache = cache
+        try:
+            dialog._after_scan()
+            dialog.filter_edit.setText("Test")
+            dialog._on_apply()
+            deadline = time.monotonic() + 5
+            while dialog._busy and time.monotonic() < deadline:
+                qt_app.processEvents()
+                time.sleep(0.005)
+            assert not dialog._busy
+            assert controller.rows[0]["bucket"] == "already"
+            assert dialog.table.item(0, 3).text() == "Already stamped"
+            assert dialog.table.item(0, 5).text() == "Updated · No changes"
+            assert "Fields written: identifiers" in dialog.table.item(0, 5).toolTip()
+            assert "Already (1)" == dialog._bucket_buttons["already"][0].text()
+            assert not dialog.apply_btn.isEnabled()
+            catalogue.fail = True
+            dialog.hide_stamped_chk.setChecked(True)
+            assert dialog.table.rowCount() == 0
+            dialog._set_bucket("already")
+            dialog.clear_filters_btn.click()
+            assert dialog.table.rowCount() == 2
+            assert not dialog.filter_edit.text()
+            assert not dialog.hide_stamped_chk.isChecked()
+            assert dialog._bucket_buttons["all"][0].isChecked()
+        finally:
+            dialog.close()
+            gui.close()

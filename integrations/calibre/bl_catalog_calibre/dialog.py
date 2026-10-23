@@ -10,8 +10,10 @@ from __future__ import annotations
 import collections
 import contextlib
 import copy
+import hashlib
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,8 @@ from .matcher import (
     apply_manual_pick,
     authors_of,
     build_proposals,
+    cover_of,
+    cover_receipt_matches,
     demote_shared,
     offered_credits,
     run_scan,
@@ -95,19 +99,43 @@ class DialogController:
             "apply_cover": options.cover,
         })
         for row in self.rows:
-            bid = int(row["id"])
-            book = self.books_by_id.get(bid)
-            work = row.get("work")
-            if book and work and row["bucket"] in APPLICABLE_BUCKETS:
-                picked = bool(row.get("picked"))
-                proposals = build_proposals(book, work, options, picked=picked)
-                row["proposals"] = proposals
-                row["add"] = dict(proposals.get("identifiers") or {})
-            elif book and work and row["bucket"] == "already":
-                with_id = str(row.get("work_id") or "") != str(row.get("bl_catalog") or "")
-                proposals = build_proposals(book, work, options, picked=False, with_id=with_id)
-                row["proposals"] = proposals
-                row["add"] = dict(proposals.get("identifiers") or {})
+            self._refresh_proposals(row)
+
+    def _refresh_proposals(self, row: dict[str, Any]) -> None:
+        book = self.books_by_id.get(int(row["id"]))
+        work = row.get("work")
+        if book and work and row["bucket"] in APPLICABLE_BUCKETS + ("already",):
+            with_id = row["bucket"] != "already" or str(row.get("work_id") or "") != str(row.get("bl_catalog") or "")
+            proposals = build_proposals(book, work, self.options, picked=bool(row.get("picked")),
+                                        with_id=with_id, cover_receipt=row.get("cover_receipt"))
+            row["proposals"] = proposals
+            row["add"] = dict(proposals.get("identifiers") or {})
+
+    def validate_cover_receipt(self, book_id: int) -> bool:
+        """Read one selected cover; invalidate its receipt when the stored bytes changed."""
+        bid = int(book_id)
+        row = next((row for row in self.rows if int(row["id"]) == bid), None)
+        if row is None or not row.get("cover_receipt"):
+            return False
+        receipt = row["cover_receipt"]
+        verified = False
+        if cover_receipt_matches(receipt, cover_of(row.get("work") or {})):
+            try:
+                current = self.writer.cover_bytes(bid)
+                verified = bool(current) and hashlib.sha256(current).hexdigest() == receipt["stored_sha256"]
+            except Exception:  # noqa: BLE001 - receipt checks must not prevent inspecting a book
+                verified = False
+        if verified:
+            return True
+        row.pop("cover_receipt", None)
+        self._refresh_proposals(row)
+        raw = self._raw_rows.get(bid, row)
+        raw.pop("cover_receipt", None)
+        self._refresh_proposals(raw)
+        version = row.get("matched_catalog_version") or self.catalog_version
+        if self.scan_cache is not None and version:
+            self.scan_cache.save(self.books_by_id, [raw], self._cache_scope(), version, set(self.books_by_id))
+        return False
 
     def build_lookups(self) -> Lookups:
         if self._injected_lookups is not None:
@@ -150,12 +178,12 @@ class DialogController:
         return target, version
 
     def _cache_scope(self) -> str:
-        return json.dumps([MATCHER_REVISION, self.prefs.get("url"), self.prefs.get("mode")], sort_keys=True)
+        return json.dumps([MATCHER_REVISION, self.prefs.get("url")], sort_keys=True)
 
     def _same_cache_scope(self, stored: str) -> bool:
         try:
             old = json.loads(stored)
-            return isinstance(old, list) and old[:3] == json.loads(self._cache_scope())
+            return isinstance(old, list) and old[:2] == json.loads(self._cache_scope())
         except (TypeError, ValueError):
             return False
 
@@ -238,6 +266,13 @@ class DialogController:
                             apply_manual_pick(row, book, picked_work, self.options)
                     if version and lookups.version and lookups.version != version:
                         raise CatalogueError("BLC changed during the scan. Run Scan Changes again.")
+                if (entry and self._same_cache_scope(entry["scope"])
+                        and entry["fingerprint"] == fingerprint(book) and entry["row"].get("cover_receipt")):
+                    row["cover_receipt"] = copy.deepcopy(entry["row"]["cover_receipt"])
+                elif self.scan_cache is None and self._raw_rows.get(bid, {}).get("cover_receipt"):
+                    previous_book = self.books_by_id.get(bid)
+                    if previous_book and fingerprint(previous_book) == fingerprint(book):
+                        row["cover_receipt"] = copy.deepcopy(self._raw_rows[bid]["cover_receipt"])
                 row["matched_catalog_version"] = version or lookups.version
                 raw_rows.append(row)
                 if progress:
@@ -367,6 +402,7 @@ class DialogController:
                 "picked": bool(row.get("picked")),
                 "work_id": row.get("work_id"),
                 "picked_work_id": row.get("work_id") if row.get("picked") else None,
+                "cover_receipt": row.get("cover_receipt"),
             })
 
         lookups = self.build_lookups()
@@ -415,9 +451,23 @@ class DialogController:
                     apply_manual_pick(row, book, work, self.options)
             if row["bucket"] == "error":
                 raise CatalogueError(row.get("reason") or "Could not refresh a written book")
+            self.catalog_version = lookups.version or self.catalog_version
             row["applied_at"] = result.get("at", "")
             row["matched_catalog_version"] = self.catalog_version
             row["updated_fields"] = list(result.get("fields_updated") or [])
+            if "cover" in row["updated_fields"]:
+                try:
+                    stored_cover = self.writer.cover_bytes(bid)
+                    catalogue_sha = result.get("catalogue_cover_sha256") or (cover_of(row.get("work") or {}) or {}).get("sha256")
+                    if stored_cover and catalogue_sha:
+                        row["cover_receipt"] = {
+                            "catalogue_sha256": str(catalogue_sha).lower(),
+                            "stored_sha256": hashlib.sha256(stored_cover).hexdigest(),
+                        }
+                except Exception as exc:  # noqa: BLE001 - receipt failure must not hide a successful write
+                    row["cover_receipt_error"] = str(exc) or type(exc).__name__
+            elif old.get("cover_receipt"):
+                row["cover_receipt"] = copy.deepcopy(old["cover_receipt"])
             if result.get("added"):
                 row["updated_fields"].insert(0, "identifiers")
             raw[bid] = row
@@ -447,6 +497,7 @@ def _import_qt():
             QHeaderView,
             QIcon,
             QLabel,
+            QLayout,
             QLineEdit,
             QListWidget,
             QListWidgetItem,
@@ -460,7 +511,9 @@ def _import_qt():
             Qt,
             QTableWidget,
             QTableWidgetItem,
+            QTabWidget,
             QTextBrowser,
+            QTimer,
             QVBoxLayout,
             QWidget,
             pyqtSignal,
@@ -479,6 +532,7 @@ def _import_qt():
             "QIcon": QIcon,
             "QLabel": QLabel,
             "QLineEdit": QLineEdit,
+            "QLayout": QLayout,
             "QListWidget": QListWidget,
             "QListWidgetItem": QListWidgetItem,
             "QMessageBox": QMessageBox,
@@ -492,6 +546,8 @@ def _import_qt():
             "Qt": Qt,
             "QTableWidget": QTableWidget,
             "QTableWidgetItem": QTableWidgetItem,
+            "QTabWidget": QTabWidget,
+            "QTimer": QTimer,
             "QTextBrowser": QTextBrowser,
             "QVBoxLayout": QVBoxLayout,
             "QWidget": QWidget,
@@ -643,6 +699,8 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
     QSplitter = qt["QSplitter"]
     QTableWidget = qt["QTableWidget"]
     QTableWidgetItem = qt["QTableWidgetItem"]
+    QTabWidget = qt["QTabWidget"]
+    QGridLayout = qt["QGridLayout"]
     QHeaderView = qt["QHeaderView"]
     QAbstractItemView = qt["QAbstractItemView"]
     QTextBrowser = qt["QTextBrowser"]
@@ -686,8 +744,13 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self._bridge = _JobBridge(self)
             self._bridge.finished.connect(self._on_job_finished)
             self._bridge.progressed.connect(self._on_job_progress)
+            self._elapsed_timer = qt["QTimer"](self)
+            self._elapsed_timer.setInterval(1000)
+            self._elapsed_timer.timeout.connect(self._update_elapsed)
 
             root = QVBoxLayout(self)
+            root.setSizeConstraint(qt["QLayout"].SizeConstraint.SetNoConstraint)
+            self.setMinimumSize(1000, 720)
             root.setContentsMargins(0, 0, 0, 0)
             root.setSpacing(0)
 
@@ -696,7 +759,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             header.setObjectName("HeaderBar")
             hbar = QHBoxLayout(header)
             hbar.setContentsMargins(20, 12, 20, 12)
-            hbar.setSpacing(14)
+            hbar.setSpacing(12)
 
             if icon is not None:
                 icon_lbl = QLabel()
@@ -733,23 +796,21 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.filter_edit.setMinimumWidth(280)
             self.filter_edit.setClearButtonEnabled(True)
             self.filter_edit.textChanged.connect(self._on_filter_changed)
-            hbar.addWidget(self.filter_edit)
 
             root.addWidget(header)
 
             # --- Body container ---
             body = QVBoxLayout()
-            body.setContentsMargins(20, 16, 20, 16)
-            body.setSpacing(14)
+            body.setContentsMargins(20, 12, 20, 16)
+            body.setSpacing(12)
 
             # --- Hero Card (#343f44) ---
             hero = QFrame(self)
             hero.setObjectName("HeroCard")
             hero_layout = QVBoxLayout(hero)
-            hero_layout.setContentsMargins(18, 16, 18, 16)
-            hero_layout.setSpacing(10)
+            hero_layout.setContentsMargins(16, 12, 16, 12)
+            hero_layout.setSpacing(8)
 
-            top_row = QHBoxLayout()
             state_col = QVBoxLayout()
             self.hero_state = QLabel("Ready to scan Calibre library")
             self.hero_state.setObjectName("HeroState")
@@ -762,24 +823,25 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.hero_sub.setWordWrap(True)
             state_col.addWidget(self.hero_state)
             state_col.addWidget(self.hero_sub)
-            top_row.addLayout(state_col, 1)
+            hero_layout.addLayout(state_col)
 
             ctl_row = QHBoxLayout()
             ctl_row.setSpacing(8)
             self.scan_sel_btn = QPushButton(f"Scan Selected ({len(self._selected_ids)})")
-            self.scan_sel_btn.setObjectName("PrimaryButton")
             self.scan_sel_btn.setEnabled(bool(self._selected_ids))
             self.scan_sel_btn.clicked.connect(lambda: self._run_scan(selected_only=True))
             ctl_row.addWidget(self.scan_sel_btn)
 
             self.scan_all_btn = QPushButton("Scan Changes")
-            if not self._selected_ids:
-                self.scan_all_btn.setObjectName("PrimaryButton")
             self.scan_all_btn.clicked.connect(lambda: self._run_scan(selected_only=False))
             ctl_row.addWidget(self.scan_all_btn)
             self.rescan_btn = QPushButton("Force Full Rescan")
             self.rescan_btn.clicked.connect(lambda: self._run_scan(selected_only=False, force=True))
             ctl_row.addWidget(self.rescan_btn)
+            ctl_row.addStretch(1)
+            self.elapsed_lbl = QLabel("")
+            self.elapsed_lbl.setObjectName("MutedLabel")
+            ctl_row.addWidget(self.elapsed_lbl)
 
             self.csv_btn = QPushButton("Export CSV")
             self.csv_btn.setEnabled(False)
@@ -791,17 +853,20 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.cancel_btn.clicked.connect(self._on_cancel)
             ctl_row.addWidget(self.cancel_btn)
 
-            top_row.addLayout(ctl_row)
-            hero_layout.addLayout(top_row)
+            hero_layout.addLayout(ctl_row)
 
             self.progress = QProgressBar()
             self.progress.setRange(0, 100)
             self.progress.setValue(0)
+            self.progress.setVisible(False)
             hero_layout.addWidget(self.progress)
 
             # Bucket filter pills
-            pills_row = QHBoxLayout()
-            pills_row.setSpacing(6)
+            self._bucket_bar = QFrame()
+            self._bucket_grid = QGridLayout(self._bucket_bar)
+            self._bucket_grid.setContentsMargins(0, 0, 0, 0)
+            self._bucket_grid.setSpacing(6)
+            self._bucket_columns = 4
             for b_key, b_title in (
                 ("all", "All"),
                 ("certain_isbn", "Certain \u00b7 ISBN"),
@@ -813,15 +878,28 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                 ("not_in_blc", "Not in BLC"),
             ):
                 btn = QPushButton(f"{b_title} (0)")
+                btn.setObjectName("BucketButton")
                 btn.setCheckable(True)
                 btn.setChecked(b_key == "all")
                 btn.clicked.connect(lambda _checked, k=b_key: self._set_bucket(k))
                 self._bucket_buttons[b_key] = (btn, b_title)
-                pills_row.addWidget(btn)
-            pills_row.addStretch(1)
-            hero_layout.addLayout(pills_row)
+                index = len(self._bucket_buttons) - 1
+                self._bucket_grid.addWidget(btn, index // 4, index % 4)
+            hero_layout.addWidget(self._bucket_bar)
 
             body.addWidget(hero)
+
+            filter_row = QHBoxLayout()
+            filter_row.setSpacing(12)
+            filter_row.addWidget(self.filter_edit, 1)
+            self.clear_filters_btn = QPushButton("Clear Filters")
+            self.clear_filters_btn.clicked.connect(self._clear_filters)
+            filter_row.addWidget(self.clear_filters_btn)
+            self.hide_stamped_chk = QCheckBox("Hide BLC-stamped books")
+            self.hide_stamped_chk.setChecked(controller.hide_stamped)
+            self.hide_stamped_chk.toggled.connect(self._on_hide_stamped)
+            filter_row.addWidget(self.hide_stamped_chk)
+            body.addLayout(filter_row)
 
             # --- Main Splitter: Left Table + Right Inspector/Picker ---
             splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -861,17 +939,8 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.table_empty_lbl.setWordWrap(True)
             self.details_columns = QCheckBox("Show work ID and reason columns")
             self.details_columns.toggled.connect(self._on_detail_columns)
-            table_controls = QHBoxLayout()
-            self.clear_filters_btn = QPushButton("Clear Filters")
-            self.clear_filters_btn.clicked.connect(self._clear_filters)
-            table_controls.addWidget(self.clear_filters_btn)
-            self.hide_stamped_chk = QCheckBox("Hide BLC-stamped books")
-            self.hide_stamped_chk.setChecked(controller.hide_stamped)
-            self.hide_stamped_chk.toggled.connect(self._on_hide_stamped)
-            table_controls.addWidget(self.hide_stamped_chk)
-            table_controls.addWidget(self.details_columns)
-            table_controls.addStretch(1)
-            table_layout.addLayout(table_controls)
+            table_layout.setSpacing(6)
+            filter_row.addWidget(self.details_columns)
             table_layout.addWidget(self.table_empty_lbl)
             table_layout.addWidget(self.table, 1)
             splitter.addWidget(table_panel)
@@ -881,20 +950,21 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             right_layout = QVBoxLayout(right_card)
             right_layout.setContentsMargins(14, 14, 14, 14)
             right_layout.setSpacing(8)
-
-            insp_head = QLabel("WORK INSPECTOR & MANUAL PICKER")
-            insp_head.setObjectName("SectionHeading")
-            insp_head.setWordWrap(True)
-            right_layout.addWidget(insp_head)
-
+            self.inspector_tabs = QTabWidget()
+            right_layout.addWidget(self.inspector_tabs)
             self.detail_view = QTextBrowser()
             self.detail_view.setOpenExternalLinks(True)
-            right_layout.addWidget(self.detail_view, 1)
+            self.inspector_tabs.addTab(self.detail_view, "Book details")
+            picker = qt["QWidget"]()
+            picker_layout = QVBoxLayout(picker)
+            picker_layout.setContentsMargins(8, 12, 8, 0)
+            picker_layout.setSpacing(8)
+            self.inspector_tabs.addTab(picker, "Manual match")
 
             pick_head = QLabel("PICK CATALOGUE WORK (ANTHOLOGIES & OVERRIDES)")
             pick_head.setObjectName("SectionHeading")
             pick_head.setWordWrap(True)
-            right_layout.addWidget(pick_head)
+            picker_layout.addWidget(pick_head)
 
             pick_bar = QHBoxLayout()
             self.pick_search = QLineEdit()
@@ -904,22 +974,21 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.pick_search_btn = QPushButton("Search BLC")
             self.pick_search_btn.clicked.connect(self._on_search_blc)
             pick_bar.addWidget(self.pick_search_btn)
-            right_layout.addLayout(pick_bar)
+            picker_layout.addLayout(pick_bar)
 
             self.pick_status = QLabel("Search BL-Catalog to find a work to assign.")
             self.pick_status.setObjectName("MutedLabel")
             self.pick_status.setWordWrap(True)
-            right_layout.addWidget(self.pick_status)
+            picker_layout.addWidget(self.pick_status)
 
             self.pick_list = QListWidget()
-            self.pick_list.setMaximumHeight(110)
             self.pick_list.currentRowChanged.connect(self._update_pick_enabled)
-            right_layout.addWidget(self.pick_list)
+            picker_layout.addWidget(self.pick_list, 1)
 
             self.pick_apply_btn = QPushButton("Assign Work to Selected Book")
             self.pick_apply_btn.setEnabled(False)
             self.pick_apply_btn.clicked.connect(self._on_assign_pick)
-            right_layout.addWidget(self.pick_apply_btn)
+            picker_layout.addWidget(self.pick_apply_btn)
 
             splitter.addWidget(right_card)
             splitter.setStretchFactor(0, 3)
@@ -930,7 +999,18 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             # --- Footer Apply Card ---
             footer = QFrame(self)
             footer.setObjectName("Card")
-            flayout = QHBoxLayout(footer)
+            footer_layout = QGridLayout(footer)
+            footer_layout.setContentsMargins(16, 12, 16, 12)
+            footer_layout.setSpacing(8)
+            self._field_bar = QFrame()
+            self._field_grid = QGridLayout(self._field_bar)
+            self._field_grid.setContentsMargins(0, 0, 0, 0)
+            self._field_grid.setHorizontalSpacing(16)
+            self._field_grid.setVerticalSpacing(8)
+            self._field_columns = 4
+            footer_layout.addWidget(self._field_bar, 0, 0)
+            self._apply_bar = QFrame()
+            flayout = QHBoxLayout(self._apply_bar)
             flayout.setContentsMargins(16, 12, 16, 12)
             flayout.setSpacing(12)
 
@@ -949,7 +1029,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.chk_cover = QCheckBox("Cover")
             self.chk_cover.setChecked(controller.options.cover)
 
-            for chk in (
+            self._field_checks = (
                 self.chk_identifiers,
                 self.chk_title,
                 self.chk_authors,
@@ -957,9 +1037,10 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                 self.chk_synopsis,
                 self.chk_tags,
                 self.chk_cover,
-            ):
+            )
+            for index, chk in enumerate(self._field_checks):
                 chk.toggled.connect(self._on_options_toggled)
-                flayout.addWidget(chk)
+                self._field_grid.addWidget(chk, index // 4, index % 4)
 
             flayout.addStretch(1)
 
@@ -974,12 +1055,48 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.apply_btn.setEnabled(False)
             self.apply_btn.clicked.connect(self._on_apply)
             flayout.addWidget(self.apply_btn)
+            flayout.setContentsMargins(0, 0, 0, 0)
+            footer_layout.addWidget(self._apply_bar, 1, 0)
+            self._footer_grid = footer_layout
+            self._footer_inline = False
 
             body.addWidget(footer)
             root.addLayout(body, 1)
             self._populate_table()
+            self._reflow_controls()
             if controller.scan_cache is not None:
                 self._start_job("Load saved scan", controller.restore_cache, self._after_restore, cancellable=False)
+
+        def resizeEvent(self, event: Any) -> None:
+            super().resizeEvent(event)
+            if hasattr(self, "_field_checks"):
+                self._reflow_controls()
+
+        def _reflow_controls(self) -> None:
+            for grid, bar, widgets, attr in (
+                (self._bucket_grid, self._bucket_bar,
+                 [button for button, _label in self._bucket_buttons.values()], "_bucket_columns"),
+                (self._field_grid, self._field_bar, self._field_checks, "_field_columns"),
+            ):
+                gap = grid.horizontalSpacing()
+                required = sum(widget.sizeHint().width() for widget in widgets) + gap * (len(widgets) - 1)
+                available = max(0, self.width() - 76)
+                columns = len(widgets) if required <= available else 4
+                if columns == getattr(self, attr):
+                    continue
+                for widget in widgets:
+                    grid.removeWidget(widget)
+                for column in range(8):
+                    grid.setColumnStretch(column, 0)
+                for index, widget in enumerate(widgets):
+                    grid.addWidget(widget, index // columns, index % columns)
+                setattr(self, attr, columns)
+            field_width = sum(widget.sizeHint().width() for widget in self._field_checks) + 16 * 6
+            inline = field_width + self._apply_bar.sizeHint().width() + 12 <= self.width() - 76
+            if inline != self._footer_inline:
+                self._footer_grid.removeWidget(self._apply_bar)
+                self._footer_grid.addWidget(self._apply_bar, 0 if inline else 1, 1 if inline else 0)
+                self._footer_inline = inline
 
         def _after_restore(self, restored: bool) -> None:
             if restored:
@@ -1026,6 +1143,11 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self._cancel.clear()
             self._job_done = on_done
             self._job_title = title
+            self._job_started = time.monotonic()
+            self._update_elapsed()
+            self._elapsed_timer.start()
+            self.progress.setRange(0, 0)
+            self.progress.setVisible(True)
             self._locked = [(w, w.isEnabled()) for w in self._lockable_widgets()]
             for w, _was in self._locked:
                 w.setEnabled(False)
@@ -1040,8 +1162,14 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
 
             threading.Thread(target=_run, name="blc-calibre-job", daemon=True).start()
 
+        def _update_elapsed(self) -> None:
+            elapsed = time.monotonic() - self._job_started
+            self.elapsed_lbl.setText(f"{self._job_title} · {elapsed:.0f}s")
+
         def _on_job_progress(self, done: int, total: int) -> None:
             if total > 0:
+                self.progress.setRange(0, 100)
+                self.progress.setFormat(f"{done} / {total}")
                 self.progress.setValue(int(done * 100 / total))
 
         def _on_job_finished(self, outcome: Any) -> None:
@@ -1049,6 +1177,11 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             on_done = self._job_done
             self._busy = False
             self._job_done = None
+            self._elapsed_timer.stop()
+            elapsed = time.monotonic() - self._job_started
+            self.elapsed_lbl.setText(f"{self._job_title} · {elapsed:.1f}s")
+            self.progress.setVisible(False)
+            self.progress.setRange(0, 100)
             for w, was in self._locked:
                 w.setEnabled(was)
             self._locked = []
@@ -1132,6 +1265,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             for k, (btn, _title) in self._bucket_buttons.items():
                 btn.setChecked(k == bucket)
             self._populate_table()
+            self._reflow_controls()
 
         def _on_filter_changed(self, text: str) -> None:
             controller.search_filter = text
@@ -1200,6 +1334,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                 self.hero_sub.setText(self.hero_sub.text() + " · Cache save failed: " + controller.scan_cache.error)
             self.apply_btn.setEnabled(ready_count > 0 and not controller.cache_needs_check)
             self._populate_table()
+            self._reflow_controls()
 
         def _on_detail_columns(self, visible: bool) -> None:
             self.table.setColumnHidden(4, not visible)
@@ -1346,9 +1481,17 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             return None
 
         def _on_row_selected(self) -> None:
+            row = self._current_row()
+            if row is not None and row.get("cover_receipt") and not self._busy:
+                controller.validate_cover_receipt(int(row["id"]))
+                selected_items = self.table.selectedItems()
+                if selected_items:
+                    proposal_item = self.table.item(selected_items[0].row(), 5)
+                    if proposal_item is not None:
+                        proposal_item.setText(self._proposal_text(row))
+                        proposal_item.setToolTip(self._proposal_tooltip(row))
             self._update_apply_label()
             self._update_pick_enabled()
-            row = self._current_row()
             if row is None:
                 self.detail_view.setPlainText("Select a book to inspect its match and proposed updates.")
                 return
@@ -1483,6 +1626,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                 failure = failures[0]
                 rollback = failure.get("rolled_back")
                 recovery = (
+                    "No changes were written to this book." if failure.get("stage") == "before_write" else
                     "The failed book's changes were rolled back." if rollback is True else
                     "Rollback could not be confirmed; check this book before retrying."
                 )

@@ -104,6 +104,9 @@ def build_stylesheet() -> str:
         background-color: {t["color_bg"]};
         border-bottom: 1px solid {t["color_border"]};
     }}
+    QLabel, QCheckBox {{
+        color: {t["color_text"]};
+    }}
     QLabel#BrandTitle {{
         color: {t["color_text"]};
         font-family: "Cinzel", "Georgia", serif;
@@ -160,7 +163,7 @@ def build_stylesheet() -> str:
         color: {t["color_text"]};
         border: 1px solid {t["color_border_control"]};
         border-radius: 8px;
-        padding: 7px 14px;
+        padding: 6px 12px;
         font-weight: 600;
         min-height: 24px;
     }}
@@ -171,6 +174,12 @@ def build_stylesheet() -> str:
         background-color: #314649;
         border-color: {t["color_primary"]};
         color: {t["color_text"]};
+    }}
+    QPushButton#BucketButton {{
+        padding: 4px 10px;
+        min-height: 22px;
+        border-radius: 6px;
+        font-weight: 500;
     }}
     QPushButton#PrimaryButton {{
         background-color: {t["color_primary"]};
@@ -188,7 +197,11 @@ def build_stylesheet() -> str:
     }}
     QPushButton:focus:enabled {{
         border: 2px dashed {t["color_text"]};
-        padding: 6px 13px;
+        padding: 5px 11px;
+    }}
+    QPushButton#BucketButton:focus:enabled {{
+        border: 2px dashed {t["color_text"]};
+        padding: 3px 9px;
     }}
     QPushButton#PrimaryButton:focus:enabled {{
         background-color: {t["color_bg"]};
@@ -200,6 +213,24 @@ def build_stylesheet() -> str:
         background-color: {t["color_bg"]};
         color: {t["color_text_muted"]};
         border-color: {t["color_border"]};
+    }}
+    QTabWidget::pane {{
+        border: none;
+    }}
+    QTabBar::tab {{
+        background-color: {t["color_bg"]};
+        color: {t["color_text_panel_muted"]};
+        border: 1px solid {t["color_border"]};
+        padding: 8px 10px;
+        margin-bottom: 8px;
+    }}
+    QTabBar::tab:selected {{
+        background-color: #314649;
+        color: {t["color_text"]};
+        border-color: {t["color_primary"]};
+    }}
+    QTabBar:focus {{
+        border: 1px solid {t["color_primary"]};
     }}
     QTableWidget, QListWidget {{
         background-color: {t["color_surface"]};
@@ -282,27 +313,33 @@ def render_work_detail_html(row: dict[str, Any], work: dict[str, Any] | None = N
     cal_blc = _esc(row.get("bl_catalog") or "None")
     reason = _esc(row.get("reason") or "")
 
-    add_pills = []
+    additions = []
     for k, v in sorted(add.items()):
-        add_pills.append(
-            f'<span style="display:inline-block;padding:2px 8px;margin-right:6px;'
-            f'border-radius:6px;background:#35443c;border:1px solid #5b7053;'
-            f'color:{t["color_success"]};font-family:monospace;font-size:12px;">'
-            f'+ {_esc(k)}:{_esc(v)}</span>'
+        additions.append(
+            f'<li style="color:{t["color_success"]};font-size:12px;">'
+            f'<b>{_esc(k)}</b>: {_esc(v)}</li>'
         )
     for field_name, val in sorted(proposals.items()):
-        if field_name in ("identifiers", "cover") or not val:
+        if field_name == "identifiers" or not val:
             continue
-        shown = ", ".join(val) if isinstance(val, list) else str(val)
+        if field_name == "series" and isinstance(val, dict):
+            shown = str(val.get("series") or "")
+            if val.get("series_index") is not None:
+                shown += f" #{val['series_index']}"
+        elif field_name == "cover" and isinstance(val, dict):
+            shown = str(val.get("label") or "Catalogue cover")
+        else:
+            shown = ", ".join(val) if isinstance(val, list) else str(val)
         if len(shown) > 72:
             shown = shown[:69] + "..."
-        add_pills.append(
-            f'<span style="display:inline-block;padding:2px 8px;margin-right:6px;'
-            f'border-radius:6px;background:#314649;border:1px solid {t["color_primary"]};'
-            f'color:{t["color_primary"]};font-size:12px;">'
-            f'{_esc(field_name)}: {_esc(shown)}</span>'
+        additions.append(
+            f'<li style="color:{t["color_primary"]};font-size:12px;">'
+            f'<b>{_esc(field_name)}</b>: {_esc(shown)}</li>'
         )
-    additions_html = "".join(add_pills) if add_pills else (
+    additions_html = (
+        '<ul style="margin-top:4px;margin-bottom:8px;margin-left:18px;">'
+        + "".join(additions) + "</ul>"
+    ) if additions else (
         f'<span style="color:{t["color_text_panel_muted"]};font-style:italic;">No changes proposed</span>'
     )
 

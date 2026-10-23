@@ -49,7 +49,7 @@ def test_legacy_snapshot_is_copied_once_and_never_overwrites_pinned_data(tmp_pat
 def test_legacy_cache_scope_survives_snapshot_path_migration(setup):
     _library, catalogue, factory = setup
     ctl = factory()
-    ctl._cache_scope = lambda: json.dumps([1, ctl.prefs["url"], "snapshot", "/tmp/legacy.sqlite"])
+    ctl._cache_scope = lambda: json.dumps([1, ctl.prefs["url"], "http", "/tmp/legacy.sqlite"])
     ctl.scan()
     catalogue.fail = True
     restored = factory()

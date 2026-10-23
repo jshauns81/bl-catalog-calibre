@@ -452,6 +452,20 @@ def cover_of(work: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def cover_receipt_matches(receipt: Any, cover: dict[str, Any] | None) -> bool:
+    """A receipt can suppress a preview only for the same catalogue cover."""
+    if not isinstance(receipt, dict) or not cover:
+        return False
+    catalogue_sha = receipt.get("catalogue_sha256")
+    stored_sha = receipt.get("stored_sha256")
+    return (
+        isinstance(catalogue_sha, str) and isinstance(stored_sha, str)
+        and re.fullmatch(r"[0-9a-f]{64}", catalogue_sha) is not None
+        and re.fullmatch(r"[0-9a-f]{64}", stored_sha) is not None
+        and catalogue_sha == str(cover.get("sha256") or "").lower()
+    )
+
+
 def _additions(book: dict[str, Any], work: dict[str, Any], with_id: bool = True) -> dict[str, str]:
     add: dict[str, str] = {"bl_catalog": work["id"]} if with_id else {}
     if not isbns_of(book):
@@ -602,6 +616,7 @@ def build_proposals(
     *,
     picked: bool = False,
     with_id: bool = True,
+    cover_receipt: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compute field updates for ``book`` from ``work`` according to ``options``.
 
@@ -644,7 +659,8 @@ def build_proposals(
     if options.series:
         ser = series_of(work)
         if ser and ser.get("series") and (
-            ser["series"] != book.get("series") or ser.get("series_index") != book.get("series_index")
+            ser["series"] != book.get("series")
+            or (ser.get("series_index") is not None and ser["series_index"] != book.get("series_index"))
         ):
             proposals["series"] = ser
 
@@ -664,7 +680,7 @@ def build_proposals(
 
     if options.cover and (not picked or authors_trusted):
         cov = cover_of(work)
-        if cov and cov["good"]:
+        if cov and cov["good"] and not cover_receipt_matches(cover_receipt, cov):
             proposals["cover"] = cov
 
     return proposals
@@ -679,7 +695,7 @@ def apply_manual_pick(
     """Update a scan row when Shaun manually picks a BLC work (e.g. for an anthology or conflict)."""
     opts = options or ApplyOptions()
     offered, credits_kind = offered_credits(work)
-    proposals = build_proposals(book, work, opts, picked=True)
+    proposals = build_proposals(book, work, opts, picked=True, cover_receipt=row.get("cover_receipt"))
     add = dict(proposals.get("identifiers") or {"bl_catalog": work["id"]})
     note = f"Owner picked {work['id']}"
     if credits_kind == "contents":

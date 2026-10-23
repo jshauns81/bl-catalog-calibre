@@ -132,3 +132,16 @@ move into Already. Active filters remain in effect, so a successful book may lea
 view or disappear when stamped books are hidden. Clear Filters reveals all loaded rows again.
 Failed/rolled-back and unattempted books are not marked updated. Refresh/storage problems are
 reported separately from successful writes. No Apply writes occur when clearing filters.
+
+Snapshot downloads are checked for SQLite integrity, required tables and catalogue version
+before replacing the active file. Each local matching operation holds one read transaction,
+avoiding repeated filesystem lock traffic on network-backed configuration storage.
+
+The command area and field controls adapt to the window width. Book details and manual
+matching have separate tabs, and background operations show elapsed time and scan counts.
+
+Successful cover writes save a receipt for the catalogue image and Calibre's stored image
+(which Calibre may convert). Unchanged covers stop appearing as pending changes after Apply
+or reopening. Selecting a book checks its current cover; Apply checks again before skipping
+a cover write. External cover edits and new catalogue images remain eligible for replacement.
+Unknown catalogue series positions do not propose clearing Calibre's required series index.

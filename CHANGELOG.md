@@ -1,14 +1,16 @@
-# v1.3.0-beta.2
+# v1.3.0
 
-- Fix installing over a running older plugin by isolating snapshot migration from cached modules.
 - Restore saved matches without automatic catalogue checks, downloads or library rematching.
-- Keep catalogue snapshots in persistent configuration; migrate generated temporary snapshots.
-- Make snapshot adoption explicit, confirmed and asynchronous from both entry points.
-- Keep saved matches usable after adoption; revalidate only requested books during Apply.
-- Read Calibre's cached format list instead of checking ebook files on disk for every metadata read.
-- Recognize the catalogue snapshot's actual version key.
-- Index exact normalized titles and aliases before loading work metadata, avoiding unrelated candidates and the old 200-candidate limit.
-- Preserve filter clearing, stamped-book filtering, post-Apply refresh and existing write guards.
+- Keep the active snapshot in persistent configuration. Snapshot adoption is explicit and confirmed; existing matches remain usable, with only requested books rechecked on Apply.
+- Read Calibre's cached format list, index exact normalized titles and hold one SQLite read transaction per operation to reduce network filesystem overhead.
+- Validate downloaded SQLite data before replacing a good snapshot.
+- Refresh successful writes even when a later cover download or live-state read fails.
+- Remember verified stored covers, including Calibre conversions; avoid repeated cover proposals and writes while detecting later cover changes.
+- Remove phantom series proposals when the catalogue has no series position.
+- Reflow scan commands, filters, buckets and metadata options; separate book details from manual matching, and show elapsed time and scan counts.
+- Keep long author lists compact, show readable proposed updates, and preserve Clear Filters, stamped-book hiding, Updated markers and write guards.
+
+Native acceptance used Calibre 9.16 and a real 1,882-book library. Four selected books were written successfully; repeat Apply made no writes. An external cover edit was detected and repaired, and an injected read-back mismatch rolled back the real book. Timings depend on the host and library; see [acceptance notes](ACCEPTANCE.md) for measured results.
 
 ## v1.2.4
 

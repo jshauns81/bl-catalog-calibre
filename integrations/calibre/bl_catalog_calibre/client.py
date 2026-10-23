@@ -85,6 +85,20 @@ _EDITION_SCALARS = (
 _BOOL_FIELDS = frozenset({"in_print"})
 _LOW_SCORE = 0.5
 _AUTHOR_ORDER = "CASE wa.role WHEN 'author' THEN 0 WHEN 'editor' THEN 1 WHEN 'narrator' THEN 2 ELSE 3 END"
+_SNAPSHOT_COLUMNS = {
+    "meta": {"key", "value"},
+    "work": {"id", *_WORK_SCALARS},
+    "edition": {"id", "work_id", *_EDITION_SCALARS},
+    "work_alias": {"work_id", "title"},
+    "author": {"id", "name", "sort_name"},
+    "work_author": {"work_id", "author_id", "role"},
+    "series": {"id", "name"},
+    "work_series": {"work_id", "series_id", "position"},
+    "work_tag": {"work_id", "kind", "value"},
+    "work_ident": {"work_id", "kind", "value"},
+    "edition_ident": {"edition_id", "kind", "value", "status"},
+    "field_support": {"entity", "entity_id", "field", "value", "score", "agree_json", "disagree_json"},
+}
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -404,6 +418,7 @@ class HttpCatalogClient:
                 handle.write(raw)
                 handle.flush()
                 os.fsync(handle.fileno())
+            version = _validated_snapshot_version(tmp_name, version)
             os.replace(tmp_name, target)
         except Exception:
             if os.path.exists(tmp_name):
@@ -411,16 +426,6 @@ class HttpCatalogClient:
                     os.unlink(tmp_name)
             raise
 
-        if not version:
-            conn = open_readonly_sqlite(target)
-            try:
-                row = conn.execute("SELECT value FROM meta WHERE key IN ('catalog_version', 'version') "
-                                   "ORDER BY key='catalog_version' DESC LIMIT 1").fetchone()
-                version = str(row[0]) if row else "local"
-            except sqlite3.Error:
-                version = "local"
-            finally:
-                conn.close()
         self.version = version
         return target, version
 
@@ -431,6 +436,30 @@ def open_readonly_sqlite(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _validated_snapshot_version(path: str | Path, response_version: str) -> str:
+    """Validate the staged download before it can replace the pinned catalogue."""
+    conn = open_readonly_sqlite(path)
+    try:
+        if conn.execute("PRAGMA quick_check(1)").fetchone()[0] != "ok":
+            raise CatalogueError("Downloaded BLC snapshot failed its database integrity check")
+        for table, required in _SNAPSHOT_COLUMNS.items():
+            columns = {row["name"] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+            if not required <= columns:
+                raise CatalogueError(f"Downloaded BLC snapshot has an incompatible {table} table")
+        row = conn.execute("SELECT value FROM meta WHERE key IN ('catalog_version', 'version') "
+                           "ORDER BY key='catalog_version' DESC LIMIT 1").fetchone()
+        version = row[0] if row else None
+        if not isinstance(version, str) or not version.strip() or len(version) > 80:
+            raise CatalogueError("Downloaded BLC snapshot has no valid catalogue version")
+        if response_version and response_version != version:
+            raise CatalogueError("Downloaded BLC snapshot version differs from its response header")
+        return version
+    except sqlite3.Error as exc:
+        raise CatalogueError(f"Downloaded BLC snapshot is not a usable database: {exc}") from exc
+    finally:
+        conn.close()
 
 
 def read_calibre_books_readonly(metadata_db_path: str | Path) -> list[dict[str, Any]]:
@@ -485,7 +514,7 @@ def _series_key_norm(name: str) -> str:
 
 
 class SnapshotCatalogClient:
-    """Read-only client backed by a local BL-Catalog SQLite snapshot."""
+    """Read-only catalogue pinned in one transaction until close, including after a sync."""
 
     def __init__(
         self,
@@ -501,6 +530,7 @@ class SnapshotCatalogClient:
         self.conn = open_readonly_sqlite(self.snapshot_path)
         self.conn.create_function("fold", 1, norm, deterministic=True)
         try:
+            self.conn.execute("BEGIN")
             row = self.conn.execute("SELECT value FROM meta WHERE key IN ('catalog_version', 'version') "
                                     "ORDER BY key='catalog_version' DESC LIMIT 1").fetchone()
             self.version = str(row["value"]) if row and row["value"] else "snapshot"
@@ -513,7 +543,8 @@ class SnapshotCatalogClient:
             self.conn.close()
 
     def begin(self, requests: int | None = None, seconds: float | None = None) -> None:
-        pass
+        if self.http_client is not None:
+            self.http_client.begin(requests=requests, seconds=seconds)
 
     def _support(self, entity: str, entity_id: str) -> dict[str, list[sqlite3.Row]]:
         rows: dict[str, list[sqlite3.Row]] = {}

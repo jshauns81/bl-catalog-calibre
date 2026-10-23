@@ -33,9 +33,11 @@ from .matcher import (
     APPLICABLE_BUCKETS,
     CERTAIN,
     WORK_ID_RE,
+    CatalogueError,
     build_proposals,
     classify,
     cover_of,
+    cover_receipt_matches,
 )
 
 
@@ -224,10 +226,11 @@ def _normalize_targets(targets: list[Any]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for item in targets:
         if isinstance(item, int) and not isinstance(item, bool):
-            normalized.append({"id": item, "picked_work_id": None})
+            normalized.append({"id": item, "picked_work_id": None, "cover_receipt": None})
         elif isinstance(item, dict) and isinstance(item.get("id"), int):
             picked_wid = item.get("picked_work_id") or (item.get("work_id") if item.get("picked") else None)
-            normalized.append({"id": int(item["id"]), "picked_work_id": picked_wid})
+            normalized.append({"id": int(item["id"]), "picked_work_id": picked_wid,
+                               "cover_receipt": item.get("cover_receipt")})
         else:
             raise ApplyRefused(f"Invalid target entry: {item!r}")
     return normalized
@@ -376,7 +379,16 @@ def apply_matches(
             })
             continue
 
-        state = writer.state(bid)["state"]
+        try:
+            state = writer.state(bid)["state"]
+        except Exception as error:  # noqa: BLE001 - preserve earlier successes when a live state read fails
+            record({
+                **base,
+                "status": "failed",
+                "stage": "before_write",
+                "error": str(error) or type(error).__name__,
+            })
+            break
         if _identity(state) != _identity(book):
             record({
                 **base,
@@ -446,8 +458,22 @@ def apply_matches(
         cover_meta: dict[str, Any] | None = None
         if opts.cover and "cover" in proposals and row.get("work"):
             cov = cover_of(row["work"])
-            if cov and cov["good"] and hasattr(lookups, "verified_cover"):
-                fetched = lookups.verified_cover(wid, expected_sha256=cov["sha256"])
+            receipt = item.get("cover_receipt")
+            cover_verified = False
+            if cover_receipt_matches(receipt, cov) and hasattr(writer, "cover_bytes"):
+                try:
+                    current_cover = writer.cover_bytes(bid)
+                    cover_verified = bool(current_cover) and hashlib.sha256(current_cover).hexdigest() == receipt["stored_sha256"]
+                except Exception:  # noqa: BLE001 - an unreadable cover must not justify skipping a write
+                    cover_verified = False
+            if not cover_verified and cov and cov["good"] and hasattr(lookups, "verified_cover"):
+                try:
+                    if hasattr(lookups, "begin"):
+                        lookups.begin()
+                    fetched = lookups.verified_cover(wid, expected_sha256=cov["sha256"])
+                except CatalogueError as error:
+                    record({**base, "status": "failed", "stage": "before_write", "error": f"cover: {error}"})
+                    break
                 if fetched:
                     cover_bytes = fetched[0]
                     cover_meta = {"sha256": cov["sha256"], "width": cov["width"], "height": cov["height"]}
@@ -462,11 +488,10 @@ def apply_matches(
 
         before_fields = {f: state.get(f) for f in changes}
         cover_backup: str | None = None
-        if cover_bytes is not None and hasattr(writer, "cover_bytes"):
-            cover_backup = _save_cover_backup(log_path, bid, writer.cover_bytes(bid))
-
         written_ok = False
         try:
+            if cover_bytes is not None and hasattr(writer, "cover_bytes"):
+                cover_backup = _save_cover_backup(log_path, bid, writer.cover_bytes(bid))
             try:
                 reply = writer.set_fields(bid, changes, expected=state, cover_bytes=cover_bytes)
             except TypeError:
@@ -518,6 +543,7 @@ def apply_matches(
         non_ident_fields = [k for k in changes if k != "identifiers"]
         if cover_meta:
             non_ident_fields.append("cover")
+            entry_out["catalogue_cover_sha256"] = cover_meta["sha256"]
         if non_ident_fields:
             entry_out["fields_updated"] = non_ident_fields
         if cover_backup:

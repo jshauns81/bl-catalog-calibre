@@ -720,7 +720,8 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
     pyqtSignal = qt["pyqtSignal"]
     Qt = qt["Qt"]
 
-    writer = CalibreDbWriter(gui.current_db.new_api)
+    library_db = gui.current_db
+    writer = CalibreDbWriter(library_db.new_api)
     cache_path = default_cache_path()
     library_path = getattr(gui.current_db, "library_path", None)
     cache = ScanCache(cache_path, str(Path(library_path).resolve())) if cache_path and library_path else None
@@ -735,7 +736,11 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
 
     class _Dialog(QDialog):
         def __init__(self) -> None:
-            super().__init__(gui)
+            # A parented dialog stays above Calibre on several window managers.
+            super().__init__(None, Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint
+                             | Qt.WindowType.WindowCloseButtonHint)
+            self.setWindowModality(Qt.WindowModality.NonModal)
+            self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
             self.setWindowTitle(f"bl-catalog {RELEASE_TAG} \u00b7 Black Library Catalogue")
             if icon is not None:
                 self.setWindowIcon(icon)
@@ -745,6 +750,8 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self._candidate_works: list[dict[str, Any]] = []
             self._bucket_buttons: dict[str, Any] = {}
             self._busy = False
+            self._retired = False
+            self._library_selection = None
             self._scan_completed = False
             self._cancel = threading.Event()
             self._job_done: Any = None
@@ -955,6 +962,8 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.table.setColumnHidden(4, True)
             self.table.setColumnHidden(6, True)
             self.table.itemSelectionChanged.connect(self._on_row_selected)
+            self.table.currentCellChanged.connect(self._on_current_book_changed)
+            self.table.cellClicked.connect(self._on_current_book_changed)
             table_panel = QFrame(self)
             table_layout = QVBoxLayout(table_panel)
             table_layout.setContentsMargins(0, 0, 0, 0)
@@ -965,7 +974,20 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self.details_columns.toggled.connect(self._on_detail_columns)
             table_layout.setSpacing(6)
             filter_row.addWidget(self.details_columns)
-            table_layout.addWidget(self.table_empty_lbl)
+            navigation_row = QHBoxLayout()
+            navigation_row.addWidget(self.table_empty_lbl, 1)
+            self.calibre_link_status = QLabel()
+            self.calibre_link_status.setObjectName("MutedLabel")
+            self.calibre_link_status.setWordWrap(True)
+            self.calibre_link_status.setVisible(False)
+            navigation_row.addWidget(self.calibre_link_status, 1)
+            navigation_row.addStretch(1)
+            self.show_calibre_btn = QPushButton("Show in Calibre")
+            self.show_calibre_btn.setAutoDefault(False)
+            self.show_calibre_btn.setEnabled(False)
+            self.show_calibre_btn.clicked.connect(lambda: self._show_in_calibre(activate=True))
+            navigation_row.addWidget(self.show_calibre_btn)
+            table_layout.addLayout(navigation_row)
             table_layout.addWidget(self.table, 1)
             results_layout.addWidget(table_panel, 1)
 
@@ -1087,6 +1109,12 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             root.addLayout(body, 1)
             self._populate_table()
             self._reflow_controls()
+            try:
+                self._library_selection = gui.library_view.selectionModel()
+                self._library_selection.selectionChanged.connect(self.refresh_calibre_selection)
+            except AttributeError:
+                pass
+            self.finished.connect(self._disconnect_calibre_selection)
             if controller.scan_cache is not None:
                 self._start_job("Load saved scan", controller.restore_cache, self._after_restore, cancellable=False)
 
@@ -1160,7 +1188,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             ]
 
         def _start_job(self, title: str, fn: Any, on_done: Any, *, cancellable: bool) -> None:
-            if self._busy:
+            if self._busy or self._retired or gui.current_db is not library_db:
                 return
             self._busy = True
             self._cancel.clear()
@@ -1259,6 +1287,9 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
                 w.setEnabled(was)
             self._locked = []
             self.cancel_btn.setEnabled(False)
+            if self._retired:
+                super().reject()
+                return
             if not ok and self._job_title == "Scan":
                 self._populate_table()
             if not ok and self._job_title == "BLC Search":
@@ -1272,6 +1303,36 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             else:
                 QMessageBox.warning(self, f"{self._job_title} Failed", str(value) or type(value).__name__)
             self._update_pick_enabled()
+            self.refresh_calibre_selection()
+
+        def _disconnect_calibre_selection(self, *_args) -> None:
+            if self._library_selection is not None:
+                with contextlib.suppress(TypeError, RuntimeError):
+                    self._library_selection.selectionChanged.disconnect(self.refresh_calibre_selection)
+                self._library_selection = None
+
+        def retire_library(self) -> None:
+            self._retired = True
+            self._cancel.set()
+            self._disconnect_calibre_selection()
+            # Wait only for local write/read-back/rollback, never a network request.
+            if hasattr(writer, "detach"):
+                writer.detach()
+            self.hide()
+            if not self._busy:
+                super().reject()
+
+        def refresh_calibre_selection(self, *_args) -> None:
+            if self._retired or gui.current_db is not library_db:
+                return
+            try:
+                view = gui.library_view
+                self._selected_ids = [int(view.model().id(idx)) for idx in view.selectionModel().selectedRows()]
+            except (AttributeError, TypeError, ValueError):
+                return
+            self.scan_sel_btn.setText(f"Scan Selected ({len(self._selected_ids)})")
+            if not self._busy:
+                self.scan_sel_btn.setEnabled(bool(self._selected_ids))
 
         def _on_cancel(self) -> None:
             if self._busy:
@@ -1373,6 +1434,7 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             self._populate_table()
 
         def _run_scan(self, *, selected_only: bool, force: bool = False) -> None:
+            self.refresh_calibre_selection()
             ids = self._selected_ids if selected_only else None
             self.hero_state.setText("Scanning books against BL-Catalog\u2026")
             self.progress.setValue(0)
@@ -1554,7 +1616,8 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
             items = self.table.selectedItems()
             if not items:
                 return None
-            r_idx = items[0].row()
+            current = self.table.currentItem()
+            r_idx = current.row() if current is not None and current.isSelected() else items[0].row()
             id_item = self.table.item(r_idx, 0)
             if id_item is None:
                 return None
@@ -1566,22 +1629,64 @@ def create_blc_dialog(gui: Any, icon: Any = None, selected_ids: list[int] | None
 
         def _on_row_selected(self) -> None:
             row = self._current_row()
+            self.show_calibre_btn.setEnabled(row is not None and not self._retired)
             if row is not None and row.get("cover_receipt") and not self._busy:
                 controller.validate_cover_receipt(int(row["id"]))
                 selected_items = self.table.selectedItems()
                 if selected_items:
-                    proposal_item = self.table.item(selected_items[0].row(), 5)
+                    current = self.table.currentItem()
+                    r_idx = current.row() if current is not None and current.isSelected() else selected_items[0].row()
+                    proposal_item = self.table.item(r_idx, 5)
                     if proposal_item is not None:
                         proposal_item.setText(self._proposal_text(row))
                         proposal_item.setToolTip(self._proposal_tooltip(row))
             self._update_apply_label()
             self._update_pick_enabled()
             if row is None:
+                self.calibre_link_status.clear()
+                self.calibre_link_status.setVisible(False)
                 self.detail_view.setPlainText("Select a book to inspect its match and proposed updates.")
                 return
             self.detail_view.setHtml(render_work_detail_html(row, row.get("work")))
             if not self.pick_search.text().strip():
                 self.pick_search.setPlaceholderText(f"Search BLC for '{row.get('title')}'\u2026")
+
+        def _on_current_book_changed(self, row_index: int, *_args) -> None:
+            item = self.table.item(row_index, 0)
+            if item is not None:
+                self._show_in_calibre(book_id=int(item.data(Qt.ItemDataRole.UserRole)))
+                self._on_row_selected()
+
+        def _show_in_calibre(self, *, book_id: int | None = None, activate: bool = False) -> None:
+            if self._retired or gui.current_db is not library_db:
+                return
+            row = self._current_row()
+            if book_id is None:
+                if row is None:
+                    return
+                book_id = int(row["id"])
+            try:
+                view = gui.library_view
+                # select_rows clears the existing selection even when an ID is hidden.
+                if book_id not in view.ids_to_rows([book_id]):
+                    self.calibre_link_status.setText(
+                        f"Book {book_id} is hidden or removed in Calibre. Clear its search or switch virtual library to show it."
+                    )
+                    self.calibre_link_status.setVisible(True)
+                    return
+                if view.current_id != book_id or view.get_selected_ids() != [book_id]:
+                    view.select_rows([book_id], using_ids=True)
+                self.calibre_link_status.setText(f"Book {book_id} selected in Calibre.")
+                self.calibre_link_status.setVisible(True)
+                if activate:
+                    if gui.isMinimized():
+                        gui.showNormal()
+                    gui.raise_()
+                    gui.activateWindow()
+                    view.setFocus()
+            except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+                self.calibre_link_status.setText(f"Could not select book {book_id} in Calibre: {error}")
+                self.calibre_link_status.setVisible(True)
 
         def _update_pick_enabled(self) -> None:
             idx = self.pick_list.currentRow()

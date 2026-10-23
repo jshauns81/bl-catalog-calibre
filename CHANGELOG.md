@@ -1,4 +1,12 @@
-# v1.3.2
+# v1.3.3
+
+- Open the matcher as an independent, nonmodal window that can sit behind Calibre; the toolbar returns to the same open window.
+- Highlight the corresponding Calibre book when clicking or moving through BLC result rows, including conflicts. Show in Calibre brings the main window forward.
+- Preserve Calibre searches and virtual libraries; explain when they hide a requested book.
+- Keep Scan Selected in sync with Calibre's current selection, while preserving BLC Apply selections.
+- Retire the old matcher on library switches and shutdown, cancel pending work, and guard the current local write/read-back/rollback before detaching from its database.
+
+## v1.3.2
 
 - Put the results table and inspector inside one rounded panel with a small inset, keeping square table painting clear of the outer corners.
 - Give Book details / Manual match a fixed 320-pixel logical width and remove the movable divider; the table takes remaining space.

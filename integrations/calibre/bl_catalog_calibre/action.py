@@ -50,6 +50,9 @@ class BLCatalogAction(CalibreInterfaceAction):
     action_add_menu = True
     action_menu_clone_qaction = "Open BL-Catalog Matcher…"
 
+    _dialog = None
+    _sync_dialog = None
+
     def genesis(self) -> None:
         icon = _load_plugin_icon()
         if icon is not None:
@@ -77,6 +80,8 @@ class BLCatalogAction(CalibreInterfaceAction):
                 triggered=self.show_configuration,
             )
         self.qaction.triggered.connect(self.show_dialog)
+        if hasattr(self.gui, "shutdown_started"):
+            self.gui.shutdown_started.connect(self._retire_dialog)
 
     def _selected_book_ids(self) -> list[int]:
         try:
@@ -88,25 +93,63 @@ class BLCatalogAction(CalibreInterfaceAction):
         except (AttributeError, TypeError, ValueError):
             return []
 
-    def show_dialog(self) -> None:
-        icon = _load_plugin_icon()
-        selected_ids = self._selected_book_ids()
-        dlg = create_blc_dialog(self.gui, icon=icon, selected_ids=selected_ids)
-        dlg.exec()
+    def show_dialog(self):
+        dlg = self._dialog
+        if dlg is None:
+            dlg = create_blc_dialog(self.gui, icon=_load_plugin_icon(), selected_ids=self._selected_book_ids())
+            self._dialog = dlg
+
+            def released(_result) -> None:
+                if self._dialog is dlg:
+                    self._dialog = None
+                dlg.deleteLater()
+
+            dlg.finished.connect(released)
+        dlg.refresh_calibre_selection()
+        if dlg.isMinimized():
+            dlg.showNormal()
+        else:
+            dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        return dlg
 
     def sync_snapshot_now(self) -> None:
-        dlg = create_blc_dialog(self.gui, icon=_load_plugin_icon(), selected_ids=self._selected_book_ids())
+        dlg = self.show_dialog()
+        if self._sync_dialog is dlg:
+            return
+        self._sync_dialog = dlg
         # Use the dialog's confirmation and worker rather than downloading on the GUI thread.
         from qt.core import QTimer
 
         def sync_when_ready() -> None:
+            if self._dialog is not dlg or not dlg.isVisible():
+                if self._sync_dialog is dlg:
+                    self._sync_dialog = None
+                return
             if dlg._busy:
                 QTimer.singleShot(100, sync_when_ready)
             else:
+                self._sync_dialog = None
                 dlg._on_sync_snapshot()
 
         QTimer.singleShot(0, sync_when_ready)
-        dlg.exec()
+
+    def library_about_to_change(self, olddb, db) -> None:
+        self._retire_dialog()
+
+    def library_changed(self, db) -> None:
+        self._retire_dialog()
+
+    def shutting_down(self) -> None:
+        self._retire_dialog()
+
+    def _retire_dialog(self) -> None:
+        dlg = self._dialog
+        if dlg is not None:
+            self._dialog = None
+            # A running worker keeps its window/bridge alive until it has stopped.
+            dlg.retire_library()
 
     def show_configuration(self) -> None:
         self.interface_action_base_plugin.do_user_config(self.gui)

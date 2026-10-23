@@ -39,3 +39,13 @@ The existing large-font layout, manual-match and progress tests pass. Independen
 A separate Qt preference check changed Max to 500, finished editing and reopened the dialog: 500 was retained, only max_apply was saved, the update channel stayed unchanged, and the existing 1–5,000 range remained. No real metadata writes were performed for this layout refinement.
 
 The matcher window title identifies plugin release v1.3.2 separately from the active catalogue snapshot label. Toolbar code installed into a running Calibre process becomes active on a full Calibre restart; a temporary QA window opened yesterday was loaded explicitly for testing in that process.
+
+## v1.3.3 working beside Calibre
+
+Automated Qt checks use a real Qt main window and library view with Calibre's documented selection API shape, rather than the user's running Calibre process. The matcher is an unparented normal nonmodal window without a stay-on-top flag. Main-window input remains enabled. Repeated toolbar opens reuse the window and restore it after minimization; close/reopen creates a new window.
+
+Mouse clicks and keyboard navigation select the corresponding book ID even when Calibre and BLC sort differently. Show in Calibre brings the main window forward. Hidden IDs leave the current Calibre selection and filter unchanged. Live Calibre selection changes update Scan Selected; table refreshes preserve BLC Apply scope without selecting a new book in Calibre.
+
+Library-switch and shutdown tests retire the matcher, cancel work and avoid callbacks into the next library. A retired worker keeps its Qt bridge alive until completion. Threaded writer checks prove that detachment waits for local verification and rollback, blocks later writes, and does not wait for cover networking. Cancellation during a download produces no writes. Stale state and partial-write exceptions release the lifecycle gate. Repeated pending snapshot menu requests are coalesced, and closing the window stops a queued request.
+
+The fixed inspector and large-font geometry checks remain passing. This release was not installed into or interactively tested in the user's active RDP Calibre session, and no real books were changed for this update.

@@ -21,10 +21,12 @@ Preserves every safety invariant from library-finish PR #208 (D078):
 from __future__ import annotations
 
 import collections
+import contextlib
 import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -100,9 +102,25 @@ class CalibreDbWriter:
 
     def __init__(self, new_api: Any) -> None:
         self.db = new_api
+        self._lifecycle_lock = threading.RLock()
+        self._detached = False
 
     def available(self) -> bool:
-        return self.db is not None
+        return self.db is not None and not self._detached
+
+    def detach(self) -> None:
+        """Stop new writes after any current write, verification and rollback finish."""
+        self._detached = True
+        with self._lifecycle_lock:
+            pass
+
+    @contextlib.contextmanager
+    def write_session(self):
+        """Keep library detachment outside a book's local write and verification."""
+        with self._lifecycle_lock:
+            if self._detached:
+                raise ApplyRefused("The Calibre library changed or is closing; reopen BL-Catalog before applying")
+            yield
 
     def read_books(self, book_ids: list[int] | tuple[int, ...] | None = None) -> list[dict[str, Any]]:
         ids = sorted(book_ids) if book_ids is not None else sorted(self.db.all_book_ids())
@@ -176,6 +194,16 @@ class CalibreDbWriter:
         Calibre has no multi-field transaction, so this re-reads the book immediately before
         writing and restores every field already written if a later write raises.
         """
+        with self.write_session():
+            return self._set_fields(bid, changes, expected=expected, cover_bytes=cover_bytes)
+
+    def _set_fields(
+        self,
+        bid: int,
+        changes: dict[str, Any],
+        expected: dict[str, Any] | None = None,
+        cover_bytes: bytes | None = None,
+    ) -> dict[str, Any]:
         bid = int(bid)
         before = self.state(bid)["state"]
         if expected is not None and before != expected:
@@ -512,49 +540,59 @@ def apply_matches(
         before_fields = {f: state.get(f) for f in changes}
         cover_backup: str | None = None
         written_ok = False
-        try:
-            if cover_bytes is not None and hasattr(writer, "cover_bytes"):
-                cover_backup = _save_cover_backup(log_path, bid, writer.cover_bytes(bid))
-            report("writing", base)
+        with contextlib.ExitStack() as session:
             try:
-                reply = writer.set_fields(bid, changes, expected=state, cover_bytes=cover_bytes)
-            except TypeError:
-                # Backward-compatible with 3-arg FakeWriter.set_fields(bid, changes, expected=state)
-                reply = writer.set_fields(bid, changes, expected=state)
-            written_ok = True
-            report("verifying", base)
-            after = writer.state(bid)["state"]
-            if "identifiers" in changes and dict(after["identifiers"]) != changes["identifiers"]:
-                raise RuntimeError("read-back: identifiers differ from what was sent")
-            for field_name, expected_val in changes.items():
-                if field_name == "identifiers":
+                if hasattr(writer, "write_session"):
+                    session.enter_context(writer.write_session())
+                if should_stop is not None and should_stop():
+                    record({
+                        **base,
+                        "status": "cancelled",
+                        "error": "apply cancelled before this book was written",
+                    })
                     continue
-                if after.get(field_name) != expected_val:
-                    raise ReadBackMismatch(field_name, expected_val, after.get(field_name))
-            if any(after.get(f) != state.get(f) for f in state if f not in changes):
-                raise RuntimeError("read-back: a field other than the requested fields changed")
-        except Exception as error:  # noqa: BLE001 - any writer or read-back failure halts the batch
-            rolled_back: bool | None = None
-            if written_ok and hasattr(writer, "restore_last"):
+                if cover_bytes is not None and hasattr(writer, "cover_bytes"):
+                    cover_backup = _save_cover_backup(log_path, bid, writer.cover_bytes(bid))
+                report("writing", base)
                 try:
-                    rolled_back = bool(writer.restore_last(bid))
-                except Exception:  # noqa: BLE001 - report, never mask the original failure
-                    rolled_back = False
-            failed_entry: dict[str, Any] = {
-                **base,
-                "status": "failed",
-                "added": added_idents,
-                "before": before_fields,
-                "error": str(error),
-            }
-            if isinstance(error, ReadBackMismatch):
-                failed_entry["verification"] = error.verification
-            if rolled_back is not None:
-                failed_entry["rolled_back"] = rolled_back
-            if cover_backup:
-                failed_entry["cover_backup"] = cover_backup
-            record(failed_entry)
-            break
+                    reply = writer.set_fields(bid, changes, expected=state, cover_bytes=cover_bytes)
+                except TypeError:
+                    # Backward-compatible with 3-arg FakeWriter.set_fields(bid, changes, expected=state)
+                    reply = writer.set_fields(bid, changes, expected=state)
+                written_ok = True
+                report("verifying", base)
+                after = writer.state(bid)["state"]
+                if "identifiers" in changes and dict(after["identifiers"]) != changes["identifiers"]:
+                    raise RuntimeError("read-back: identifiers differ from what was sent")
+                for field_name, expected_val in changes.items():
+                    if field_name == "identifiers":
+                        continue
+                    if after.get(field_name) != expected_val:
+                        raise ReadBackMismatch(field_name, expected_val, after.get(field_name))
+                if any(after.get(f) != state.get(f) for f in state if f not in changes):
+                    raise RuntimeError("read-back: a field other than the requested fields changed")
+            except Exception as error:  # noqa: BLE001 - any writer or read-back failure halts the batch
+                rolled_back: bool | None = None
+                if written_ok and hasattr(writer, "restore_last"):
+                    try:
+                        rolled_back = bool(writer.restore_last(bid))
+                    except Exception:  # noqa: BLE001 - report, never mask the original failure
+                        rolled_back = False
+                failed_entry: dict[str, Any] = {
+                    **base,
+                    "status": "cancelled" if isinstance(error, ApplyRefused) and not written_ok else "failed",
+                    "added": added_idents,
+                    "before": before_fields,
+                    "error": str(error),
+                }
+                if isinstance(error, ReadBackMismatch):
+                    failed_entry["verification"] = error.verification
+                if rolled_back is not None:
+                    failed_entry["rolled_back"] = rolled_back
+                if cover_backup:
+                    failed_entry["cover_backup"] = cover_backup
+                record(failed_entry)
+                break
 
         holders[wid].add(bid)
         entry_out: dict[str, Any] = {

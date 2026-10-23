@@ -111,6 +111,21 @@ pruned; interrupted scans keep the previous cache. Filters and field toggles use
 The snapshot title index resolves full normalized titles and aliases before loading work
 metadata, avoiding hundreds of unrelated candidates for titles starting with “The”.
 
+## Working beside Calibre
+
+The matcher is an independent, nonmodal window that can sit behind Calibre or
+remain alongside it. The toolbar returns to the same open matcher. Clicking a
+result or moving between rows with the keyboard highlights that book in Calibre;
+**Show in Calibre** brings the main window forward. Search and virtual-library
+filters are preserved, with an explanation when they hide a requested book.
+**Scan Selected** follows Calibre's current selection while the matcher is open;
+BLC row selections still determine Apply scope.
+
+Library switches retire the old matcher and cancel its work. Writes remain bound
+to the original database. Detachment waits for any current local write,
+verification and rollback, and prevents later writes without waiting for networking.
+Calibre shutdown uses the same guard.
+
 ## Compact results table
 
 The default table shows ID, title, up to two authors, match bucket and proposed changes.

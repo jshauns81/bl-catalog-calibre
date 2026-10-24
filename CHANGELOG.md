@@ -1,4 +1,8 @@
-# v1.3.3
+# v1.3.4
+
+- Roll back every written field and the cover when the post-write read-back fails, so a failed Apply leaves the book exactly as it was instead of changed with nothing to undo. Found by code review of the in-repo plugin source; no behaviour change for a successful Apply.
+
+## v1.3.3
 
 - Open the matcher as an independent, nonmodal window that can sit behind Calibre; the toolbar returns to the same open window.
 - Highlight the corresponding Calibre book when clicking or moving through BLC result rows, including conflicts. Show in Calibre brings the main window forward.

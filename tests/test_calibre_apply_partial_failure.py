@@ -45,3 +45,37 @@ def test_live_state_failure_halts_before_that_books_write_and_refreshes_earlier_
         assert cache[1]["row"]["applied_at"] == results[0]["at"]
     logged = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
     assert logged == results
+
+
+def test_a_failed_read_back_after_the_writes_restores_every_written_field(tmp_path):
+    """set_fields reads the book once before writing and once after; when the second read
+    raises, the writes already happened and the caller never sees a successful return, so
+    set_fields itself must undo them before re-raising."""
+    controller, database, _lookups, raw = make_cover_controller(tmp_path)
+    writer = controller.writer
+    database.covers[1] = b"old cover"
+    original_field_for, original_set_field = database.field_for, database.set_field
+    reads = {"armed": False, "failed": False}  # fail exactly one read, the first after a write
+
+    def set_field(field, values):
+        original_set_field(field, values)
+        reads["armed"] = not reads["failed"]
+
+    def field_for(field, bid):
+        if reads["armed"]:
+            reads["armed"], reads["failed"] = False, True
+            raise OSError("metadata read failed right after the write")
+        return original_field_for(field, bid)
+
+    database.set_field, database.field_for = set_field, field_for
+    state = writer.state(1)["state"]
+    changes = {"identifiers": {"bl_catalog": "w_1"}, "comments": "Rewritten"}
+    with pytest.raises(OSError, match="right after the write"):
+        writer.set_fields(1, changes, expected=state, cover_bytes=raw)
+    assert database.data[1]["identifiers"] == {}
+    assert database.data[1]["comments"] == state["comments"]
+    # the new cover went in, then the old bytes went back through set_cover
+    assert database.cover_writes == [1, 1]
+    assert database.covers[1] == b"old cover-stored-representation"
+    assert writer.state(1)["state"] == state
+    assert writer.restore_last(1) is False

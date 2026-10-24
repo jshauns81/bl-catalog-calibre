@@ -222,7 +222,15 @@ class CalibreDbWriter:
             self._restore(bid, before, written, old_cover if cover_written else None, cover_written)
             raise
         self._last_backup = (bid, before, list(changes), old_cover, cover_bytes is not None)
-        return {"ok": True, "after": self.state(bid)["state"]}
+        try:
+            after = self.state(bid)["state"]
+        except Exception:
+            # the writes succeeded but cannot be read back: the caller never learns they
+            # happened and has nothing to restore, so undo them here
+            self._restore(bid, before, list(changes), old_cover, cover_bytes is not None)
+            self._last_backup = None
+            raise
+        return {"ok": True, "after": after}
 
     def restore_last(self, bid: int) -> bool:
         """Undo the most recent successful ``set_fields`` for ``bid`` (used after a bad read-back)."""
